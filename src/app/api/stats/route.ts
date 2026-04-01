@@ -32,27 +32,43 @@ async function supaFetch(path: string) {
   return res.json();
 }
 
-// ── API cost per video generation job ──
-// Runway Gen-4: ~$0.50/5s = ¥75, Kling: ~$0.30/5s = ¥45
+// ── 従量課金の単価 ──
+// Runway Gen-4: ~$0.50/5s = ¥75
+// Kling v1.5: ~$0.30/5s = ¥45
 // ElevenLabs TTS: ~$0.30/1000chars = ¥45
-// Average per job (video + narration): ~¥120
+// Average per video job (video gen + optional narration): ~¥120
 const COST_PER_VIDEO_JOB = 120;
 
-// ── Anthropic Claude cost ──
-// Sonnet: $3/1M input, $15/1M output ≈ ¥2.5/1K tokens avg
-// Estimate per callClaude invocation: ~800 tokens = ¥2
+// Anthropic Claude Sonnet: $3/1M input, $15/1M output
+// Average per API call (~800 tokens): ¥2
 const COST_PER_CLAUDE_CALL = 2;
+
+// OpenAI Whisper: $0.006/min ≈ ¥1/min (minimal usage)
+const COST_PER_WHISPER_MIN = 1;
+
+// Stripe: 3.6% + ¥40 per successful transaction
+const STRIPE_FIXED_FEE = 40;
+const STRIPE_PERCENT_FEE = 0.036;
 
 // ── 月額サブスクリプション (固定費) ──
 // ※ 実際に契約しているプランを反映。変更時はここを更新。
 const SUBSCRIPTIONS = [
-  { id: "claude_max",   name: "Claude Max",          monthly: 14400, note: "$100/mo" },
-  { id: "runway",       name: "Runway Standard",     monthly: 4350,  note: "$30/mo" },
-  { id: "elevenlabs",   name: "ElevenLabs Starter",  monthly: 750,   note: "$5/mo" },
-  { id: "supabase",     name: "Supabase Free",       monthly: 0,     note: "Free tier" },
-  { id: "vercel",       name: "Vercel Hobby",        monthly: 0,     note: "Free tier" },
-  { id: "r2",           name: "Cloudflare R2",       monthly: 50,    note: "~2GB stored" },
-  { id: "domain",       name: "ドメイン (.com)",      monthly: 150,   note: "~¥1,800/year" },
+  // 有料プラン
+  { id: "claude_max",   name: "Claude Max",          monthly: 14400, cat: "AI",       note: "$100/mo" },
+  { id: "runway",       name: "Runway Standard",     monthly: 4350,  cat: "AI",       note: "$30/mo" },
+  { id: "elevenlabs",   name: "ElevenLabs Starter",  monthly: 750,   cat: "AI",       note: "$5/mo" },
+  { id: "apple_dev",    name: "Apple Developer",     monthly: 1250,  cat: "ストア",   note: "¥15,000/year" },
+  { id: "r2",           name: "Cloudflare R2",       monthly: 50,    cat: "インフラ", note: "~2GB stored" },
+  { id: "domain",       name: "ドメイン (.com)",      monthly: 150,   cat: "インフラ", note: "~¥1,800/year" },
+  // 無料プラン（可視化のため記載）
+  { id: "supabase",     name: "Supabase",            monthly: 0,     cat: "インフラ", note: "Free tier" },
+  { id: "vercel",       name: "Vercel",              monthly: 0,     cat: "インフラ", note: "Hobby (Free)" },
+  { id: "github",       name: "GitHub",              monthly: 0,     cat: "開発",     note: "Free" },
+  { id: "upstash",      name: "Upstash Redis+QStash",monthly: 0,     cat: "インフラ", note: "Free tier" },
+  { id: "revenuecat",   name: "RevenueCat",          monthly: 0,     cat: "決済",     note: "Free tier" },
+  { id: "expo",         name: "Expo / EAS",          monthly: 0,     cat: "開発",     note: "Free tier" },
+  { id: "slack",        name: "Slack Webhook",       monthly: 0,     cat: "通知",     note: "Free" },
+  { id: "discord",      name: "Discord Webhook",     monthly: 0,     cat: "通知",     note: "Free" },
 ];
 const TOTAL_SUBSCRIPTIONS = SUBSCRIPTIONS.reduce((s, sub) => s + sub.monthly, 0);
 
