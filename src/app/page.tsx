@@ -382,7 +382,8 @@ function DeptRPGCard({ dept, onClick }) {
 ============================================================ */
 function TodayScore({ revenue, cost, profit, target, stats }) {
   const pct = Math.min(profit/target*100, 100);
-  const clock = new Date();
+  const [clock, setClock] = useState(() => new Date());
+  useEffect(() => { setClock(new Date()); }, []);
   const hour = clock.getHours();
   const progress = Math.round((hour/24)*100);
 
@@ -402,7 +403,7 @@ function TodayScore({ revenue, cost, profit, target, stats }) {
         <span style={{ fontFamily:FONT, fontSize:5.5, color:C.gold, letterSpacing:"0.15em" }}>
           TODAY&apos;S SCORE
         </span>
-        <span style={{ fontFamily:MONO, fontSize:10, color:C.muted, marginLeft:"auto" }}>
+        <span style={{ fontFamily:MONO, fontSize:10, color:C.muted, marginLeft:"auto" }} suppressHydrationWarning>
           {clock.toLocaleDateString("ja-JP",{month:"long",day:"numeric"})}
         </span>
       </div>
@@ -449,15 +450,15 @@ function TodayScore({ revenue, cost, profit, target, stats }) {
           本日 {progress}% 経過 · ペース {pct>progress?"✦ 順調":"⚠ 要改善"}
         </div>
       </div>
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:6 }}>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:6 }} suppressHydrationWarning>
         {[
-          {label:"ユーザー",value:stats?`${stats.users.total}人`:"—",color:C.blue,id:"users"},
-          {label:"動画生成",value:stats?`${stats.usage.videoJobs}本`:"—",color:C.purple,id:"txns"},
-          {label:"購入数",value:stats?`${stats.revenue.purchases}件`:"—",color:C.green,id:"rev"},
+          {label:"ユーザー",value:stats?`${stats.users.total}人`:"—",color:C.blue},
+          {label:"動画生成",value:stats?`${stats.usage.videoJobs}本`:"—",color:C.purple},
+          {label:"購入数",value:stats?`${stats.revenue.purchases}件`:"—",color:C.green},
         ].map(s=>(
           <div key={s.label} style={{ textAlign:"center", padding:"5px",
-            background:C.bg, borderRadius:1 }}>
-            <div style={{ fontFamily:FONT, fontSize:7, color:s.color }}>{s.value}</div>
+            background:C.bg, borderRadius:1 }} suppressHydrationWarning>
+            <div style={{ fontFamily:FONT, fontSize:7, color:s.color }} suppressHydrationWarning>{s.value}</div>
             <div style={{ fontFamily:MONO, fontSize:8, color:C.muted }}>{s.label}</div>
           </div>
         ))}
