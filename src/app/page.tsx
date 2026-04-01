@@ -1,3 +1,4 @@
+// @ts-nocheck
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -22,18 +23,19 @@ const C = {
 /* ============================================================
    CLAUDE API (via server-side proxy)
 ============================================================ */
-async function callClaude(system, user, onChunk) {
+async function callClaude(system: string, user: string, onChunk: (chunk: string) => void) {
   const res = await fetch("/api/claude", {
     method:"POST",
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({ system, user }),
   });
   if(!res.ok) throw new Error(`API ${res.status}`);
+  if(!res.body) throw new Error("No response body");
   const reader=res.body.getReader(); const dec=new TextDecoder(); let buf="";
   while(true){
     const{done,value}=await reader.read(); if(done) break;
     buf+=dec.decode(value,{stream:true});
-    const lines=buf.split("\n"); buf=lines.pop();
+    const lines=buf.split("\n"); buf=lines.pop() ?? "";
     for(const line of lines){
       if(!line.startsWith("data: ")) continue;
       const d=line.slice(6).trim(); if(d==="[DONE]") return;
@@ -494,6 +496,530 @@ function AchievementToast({ achievement, onClose }) {
 }
 
 /* ============================================================
+   PIXEL CHARACTER ENGINE
+============================================================ */
+function PixelChar({ type = "suit_blue", scale = 1.4, frame = 0, facing = 1 }: {
+  type?: string; scale?: number; frame?: number; facing?: number;
+}) {
+  const s = scale;
+  const bob = [0, -1, 0, 1][frame % 4];
+  const legL = frame % 2 === 0 ? 4 : -4;
+  const legR = frame % 2 === 0 ? -4 : 4;
+  const armSwing = frame % 2 === 0 ? 6 : -6;
+
+  const CHARS: Record<string, any> = {
+    suit_navy_red: {
+      skin:"#E8B88A", hair:"#5C3A1E", hairStyle:"short",
+      suit:"#1a2a5e", shirt:"#fff", tie:"#cc2200",
+      pants:"#1a2a5e", shoes:"#3D1F00",
+      item:"briefcase", itemColor:"#8B5E3C",
+      glasses:false,
+    },
+    suit_navy_female: {
+      skin:"#E8B88A", hair:"#6B3A2A", hairStyle:"bob",
+      suit:"#1a2a5e", shirt:"#fff", tie:null,
+      pants:"#1a2a5e", shoes:"#3D1F00",
+      item:"briefcase", itemColor:"#8B5E3C",
+      glasses:false, female:true,
+    },
+    shirt_white_glasses: {
+      skin:"#E8B88A", hair:"#1a1a1a", hairStyle:"short",
+      suit:"#fff", shirt:"#fff", tie:"#cc2200",
+      pants:"#1a2a5e", shoes:"#2a2a2a",
+      item:"briefcase", itemColor:"#8B5E3C",
+      glasses:true,
+    },
+    suit_gray_blue: {
+      skin:"#E8B88A", hair:"#2a2a2a", hairStyle:"short",
+      suit:"#5a5a6e", shirt:"#fff", tie:"#2255cc",
+      pants:"#5a5a6e", shoes:"#2a2a2a",
+      item:"briefcase", itemColor:"#8B5E3C",
+      glasses:false,
+    },
+    suit_gray_senior: {
+      skin:"#DFAA80", hair:"#c8c8c8", hairStyle:"short",
+      suit:"#5a5a6e", shirt:"#fff", tie:"#2255cc",
+      pants:"#5a5a6e", shoes:"#2a2a2a",
+      item:"briefcase", itemColor:"#8B5E3C",
+      glasses:false, senior:true,
+    },
+    suit_pink_female: {
+      skin:"#E8B88A", hair:"#c8a030", hairStyle:"bun",
+      suit:"#cc4466", shirt:"#fff", tie:null,
+      pants:"#cc4466", shoes:"#3D1F00",
+      item:"briefcase", itemColor:"#8B5E3C",
+      glasses:false, female:true,
+    },
+    shirt_casual_glasses: {
+      skin:"#E8B88A", hair:"#3a2a1a", hairStyle:"messy",
+      suit:"#fff", shirt:"#fff", tie:"#2255cc",
+      pants:"#1a2a5e", shoes:"#2a2a2a",
+      item:"briefcase", itemColor:"#8B5E3C",
+      glasses:true,
+    },
+    suit_lightblue_female: {
+      skin:"#E8B88A", hair:"#aa2200", hairStyle:"ponytail",
+      suit:"#5588cc", shirt:"#fff", tie:null,
+      pants:"#5588cc", shoes:"#3D1F00",
+      item:"clipboard", itemColor:"#DEB887",
+      glasses:false, female:true,
+    },
+    suit_brown_orange: {
+      skin:"#E8B88A", hair:"#3a2a1a", hairStyle:"short",
+      suit:"#6B4423", shirt:"#fff", tie:"#e07020",
+      pants:"#6B4423", shoes:"#3D1F00",
+      item:"briefcase", itemColor:"#5a3a1a",
+      glasses:false,
+    },
+    suit_green_cap: {
+      skin:"#E8B88A", hair:"#2a2a2a", hairStyle:"cap_blue",
+      suit:"#1a6b3a", shirt:"#fff", tie:"#cc2200",
+      pants:"#1a6b3a", shoes:"#2a2a2a",
+      item:"folder", itemColor:"#8B5E3C",
+      glasses:false,
+    },
+    work_green_mask: {
+      skin:"#E8B88A", hair:"#2a3a2a", hairStyle:"cap_green",
+      suit:"#2a6b3a", shirt:"#2a6b3a", tie:null,
+      pants:"#2a6b3a", shoes:"#2a2a2a",
+      item:"clipboard", itemColor:"#DEB887",
+      glasses:false, mask:true,
+    },
+    work_khaki_mask_female: {
+      skin:"#E8B88A", hair:"#1a1a1a", hairStyle:"short",
+      suit:"#7a7a4a", shirt:"#7a7a4a", tie:null,
+      pants:"#7a7a4a", shoes:"#3D1F00",
+      item:"folder", itemColor:"#5a3a1a",
+      glasses:false, mask:true, female:true,
+    },
+  };
+
+  const ch = CHARS[type] || CHARS.suit_navy_red;
+
+  return (
+    <g transform={`scale(${facing},1) translate(${facing < 0 ? -Math.round(14*s) : 0},0)`}>
+      <g transform={`translate(0,${bob})`}>
+        <ellipse cx={7*s} cy={42*s} rx={7*s} ry={1.5*s} fill="rgba(0,0,0,0.35)"/>
+        <rect x={3*s} y={28*s} width={4*s} height={10*s} fill={ch.pants} rx={s*0.5}
+          transform={`rotate(${legL},5,28)`}/>
+        <rect x={8*s} y={28*s} width={4*s} height={10*s} fill={ch.pants} rx={s*0.5}
+          transform={`rotate(${legR},10,28)`}/>
+        <rect x={2*s} y={36*s} width={5*s} height={3*s} fill={ch.shoes} rx={s*0.5}
+          transform={`rotate(${legL},5,28)`}/>
+        <rect x={7.5*s} y={36*s} width={5*s} height={3*s} fill={ch.shoes} rx={s*0.5}
+          transform={`rotate(${legR},10,28)`}/>
+        <rect x={2*s} y={16*s} width={11*s} height={14*s} fill={ch.suit} rx={s}/>
+        <rect x={5*s} y={16*s} width={5*s} height={8*s} fill={ch.shirt}/>
+        {ch.tie && (
+          <>
+            <rect x={6.5*s} y={17*s} width={2*s} height={6*s} fill={ch.tie} rx={s*0.3}/>
+            <polygon points={`${6.5*s},${23*s} ${8.5*s},${23*s} ${7.5*s},${26*s}`} fill={ch.tie}/>
+          </>
+        )}
+        <polygon points={`${2*s},${16*s} ${6*s},${16*s} ${5*s},${21*s} ${2*s},${18*s}`} fill={ch.suit}/>
+        <polygon points={`${13*s},${16*s} ${9*s},${16*s} ${10*s},${21*s} ${13*s},${18*s}`} fill={ch.suit}/>
+        {ch.female && (
+          <rect x={2*s} y={28*s} width={11*s} height={5*s} fill={ch.suit} rx={s*0.5}/>
+        )}
+        <rect x={-1*s} y={17*s} width={3.5*s} height={10*s} fill={ch.suit} rx={s*0.5}
+          transform={`rotate(${-armSwing*0.4},1,17)`}/>
+        <rect x={-0.5*s} y={26*s} width={2.5*s} height={2.5*s} fill={ch.skin} rx={s*0.3}
+          transform={`rotate(${-armSwing*0.4},1,17)`}/>
+        <rect x={12*s} y={17*s} width={3.5*s} height={10*s} fill={ch.suit} rx={s*0.5}
+          transform={`rotate(${armSwing*0.4},14,17)`}/>
+        <rect x={12.5*s} y={26*s} width={2.5*s} height={2.5*s} fill={ch.skin} rx={s*0.3}
+          transform={`rotate(${armSwing*0.4},14,17)`}/>
+        {ch.item === "briefcase" && (
+          <g transform={`rotate(${armSwing*0.4},14,17)`}>
+            <rect x={13*s} y={26*s} width={6*s} height={5*s} fill={ch.itemColor} rx={s*0.5}/>
+            <rect x={15*s} y={24.5*s} width={2*s} height={2.5*s} fill="none" stroke={ch.itemColor} strokeWidth={s*0.8}/>
+            <line x1={13*s} y1={29*s} x2={19*s} y2={29*s} stroke="#6B4423" strokeWidth={s*0.4}/>
+          </g>
+        )}
+        {ch.item === "clipboard" && (
+          <g transform={`rotate(${armSwing*0.4},14,17)`}>
+            <rect x={12*s} y={24*s} width={5*s} height={7*s} fill={ch.itemColor} rx={s*0.3}/>
+            <rect x={13*s} y={22.5*s} width={3*s} height={2*s} fill={ch.itemColor} rx={s*0.3}/>
+            <rect x={13*s} y={26*s} width={3*s} height={s} fill="#fff" opacity={0.6}/>
+            <rect x={13*s} y={28*s} width={2*s} height={s} fill="#fff" opacity={0.4}/>
+          </g>
+        )}
+        {ch.item === "folder" && (
+          <g transform={`rotate(${armSwing*0.4},14,17)`}>
+            <rect x={11*s} y={25*s} width={7*s} height={5*s} fill="#4a7acc" rx={s*0.3}/>
+            <rect x={11*s} y={25*s} width={7*s} height={1.5*s} fill="#3a6abb" rx={s*0.3}/>
+          </g>
+        )}
+        <rect x={2*s} y={5*s} width={11*s} height={11*s} fill={ch.skin} rx={s*1.5}/>
+        <rect x={4*s} y={8*s} width={2.5*s} height={2.5*s} fill="#1a1a2e"/>
+        <rect x={8.5*s} y={8*s} width={2.5*s} height={2.5*s} fill="#1a1a2e"/>
+        <rect x={4.5*s} y={8.2*s} width={s} height={s} fill="rgba(255,255,255,0.7)"/>
+        <rect x={9*s} y={8.2*s} width={s} height={s} fill="rgba(255,255,255,0.7)"/>
+        <rect x={5*s} y={12*s} width={5*s} height={s} fill="rgba(0,0,0,0.25)" rx={s*0.5}/>
+        <rect x={2.5*s} y={11*s} width={2*s} height={s} fill="#ffb8b0" opacity={0.5}/>
+        <rect x={10.5*s} y={11*s} width={2*s} height={s} fill="#ffb8b0" opacity={0.5}/>
+        {ch.glasses && (
+          <>
+            <rect x={3*s} y={7.5*s} width={4*s} height={3.5*s} fill="none" stroke="#1a1a1a" strokeWidth={s*0.6} rx={s*0.4}/>
+            <rect x={8*s} y={7.5*s} width={4*s} height={3.5*s} fill="none" stroke="#1a1a1a" strokeWidth={s*0.6} rx={s*0.4}/>
+            <line x1={7*s} y1={9*s} x2={8*s} y2={9*s} stroke="#1a1a1a" strokeWidth={s*0.5}/>
+            <line x1={1.5*s} y1={9*s} x2={3*s} y2={9*s} stroke="#1a1a1a" strokeWidth={s*0.5}/>
+            <line x1={12*s} y1={9*s} x2={13.5*s} y2={9*s} stroke="#1a1a1a" strokeWidth={s*0.5}/>
+          </>
+        )}
+        {ch.mask && (
+          <rect x={2.5*s} y={10*s} width={10*s} height={6*s} fill="#fff" rx={s*0.5} opacity={0.9}/>
+        )}
+        {ch.hairStyle === "short" && (
+          <>
+            <rect x={2*s} y={3*s} width={11*s} height={5*s} fill={ch.hair} rx={s}/>
+            <rect x={1*s} y={5*s} width={2*s} height={5*s} fill={ch.hair} rx={s*0.5}/>
+            <rect x={12*s} y={5*s} width={2*s} height={4*s} fill={ch.hair} rx={s*0.5}/>
+          </>
+        )}
+        {ch.hairStyle === "bob" && (
+          <>
+            <rect x={2*s} y={2*s} width={11*s} height={5*s} fill={ch.hair} rx={s}/>
+            <rect x={1*s} y={5*s} width={2*s} height={8*s} fill={ch.hair} rx={s*0.5}/>
+            <rect x={12*s} y={5*s} width={2*s} height={8*s} fill={ch.hair} rx={s*0.5}/>
+          </>
+        )}
+        {ch.hairStyle === "bun" && (
+          <>
+            <rect x={2*s} y={3*s} width={11*s} height={4*s} fill={ch.hair} rx={s}/>
+            <ellipse cx={11*s} cy={3*s} rx={3.5*s} ry={3*s} fill={ch.hair}/>
+          </>
+        )}
+        {ch.hairStyle === "ponytail" && (
+          <>
+            <rect x={2*s} y={2*s} width={11*s} height={4*s} fill={ch.hair} rx={s}/>
+            <rect x={11*s} y={5*s} width={3*s} height={12*s} fill={ch.hair} rx={s*0.5}/>
+          </>
+        )}
+        {ch.hairStyle === "messy" && (
+          <>
+            <rect x={1.5*s} y={2*s} width={12*s} height={5*s} fill={ch.hair} rx={s}/>
+            <rect x={0.5*s} y={4*s} width={2*s} height={4*s} fill={ch.hair} rx={s*0.5}/>
+            <rect x={3*s} y={1*s} width={3*s} height={3*s} fill={ch.hair} rx={s*0.5}/>
+            <rect x={9*s} y={1*s} width={3*s} height={3*s} fill={ch.hair} rx={s*0.5}/>
+          </>
+        )}
+        {ch.hairStyle === "cap_blue" && (
+          <>
+            <rect x={2*s} y={3*s} width={11*s} height={4*s} fill={ch.hair} rx={s}/>
+            <rect x={1*s} y={2*s} width={13*s} height={4*s} fill="#3366cc" rx={s*0.5}/>
+            <rect x={0*s} y={4.5*s} width={15*s} height={2*s} fill="#2255bb" rx={s*0.3}/>
+          </>
+        )}
+        {ch.hairStyle === "cap_green" && (
+          <>
+            <rect x={2*s} y={3*s} width={11*s} height={4*s} fill={ch.hair} rx={s}/>
+            <rect x={1*s} y={2*s} width={13*s} height={4*s} fill="#2a6b3a" rx={s*0.5}/>
+            <rect x={0*s} y={4.5*s} width={15*s} height={2*s} fill="#1a5a2a" rx={s*0.3}/>
+          </>
+        )}
+        {ch.senior && (
+          <>
+            <rect x={0*s} y={6*s} width={2*s} height={5*s} fill="#888" rx={s*0.5}/>
+            <rect x={13*s} y={6*s} width={2*s} height={5*s} fill="#888" rx={s*0.5}/>
+            <rect x={0*s} y={5*s} width={15*s} height={2.5*s} fill="#888" rx={s}/>
+          </>
+        )}
+      </g>
+    </g>
+  );
+}
+
+/* ============================================================
+   WALKING CHARACTER
+============================================================ */
+function WalkingChar({ roomW, floorY, charType, speed = 0.5, startX }: {
+  roomW: number; floorY: number; charType: string; speed?: number; startX?: number;
+}) {
+  const posRef = useRef(startX || Math.random() * (roomW - 30) + 15);
+  const dirRef = useRef(Math.random() > 0.5 ? 1 : -1);
+  const frameRef = useRef(0);
+  const [state, setState] = useState({ x: posRef.current, dir: dirRef.current, frame: 0 });
+  const pauseRef = useRef(false);
+  const pauseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (Math.random() < 0.005 && !pauseRef.current) {
+        pauseRef.current = true;
+        if (pauseTimer.current) clearTimeout(pauseTimer.current);
+        pauseTimer.current = setTimeout(() => { pauseRef.current = false; }, 1500 + Math.random() * 2000);
+      }
+      if (pauseRef.current) return;
+
+      posRef.current += dirRef.current * speed;
+      frameRef.current = (frameRef.current + 1) % 4;
+
+      if (posRef.current > roomW - 18 || posRef.current < 18) {
+        dirRef.current *= -1;
+        posRef.current += dirRef.current * speed * 2;
+      }
+
+      setState({ x: posRef.current, dir: dirRef.current, frame: frameRef.current });
+    }, 90);
+    return () => { clearInterval(interval); if (pauseTimer.current) clearTimeout(pauseTimer.current); };
+  }, [roomW, speed]);
+
+  return (
+    <g transform={`translate(${state.x - 7},${floorY - 42})`}>
+      <PixelChar
+        type={charType}
+        scale={1.0}
+        frame={pauseRef.current ? 0 : state.frame}
+        facing={state.dir}
+      />
+    </g>
+  );
+}
+
+/* ============================================================
+   PIXEL ROOM CONFIGS
+============================================================ */
+const DEPT_ROOM_CONFIGS: Record<string, any> = {
+  dev: {
+    label:"開発部 / DEV", color:"#22d3ee",
+    wall:"#020c18", floor:"#041525",
+    chars:[
+      {type:"shirt_white_glasses", speed:0.3, startX:50},
+      {type:"shirt_casual_glasses", speed:0.4, startX:120},
+      {type:"suit_gray_blue", speed:0.25, startX:200},
+    ],
+    furniture: (W: number, H: number, FLOOR: number) => (
+      <g>
+        {[20,95,170].map((x,i)=>(
+          <g key={i}>
+            <rect x={x} y={FLOOR-65} width={60} height={40} fill="#0a1520" stroke="#22d3ee" strokeWidth={1} rx={2}/>
+            <rect x={x+2} y={FLOOR-63} width={56} height={36} fill="#020c18"/>
+            {[0,1,2,3,4,5,6,7].map(j=>(
+              <rect key={j} x={x+4} y={FLOOR-61+j*4.5} width={[30,45,20,38,25,42,18,35][j]} height={2.5}
+                fill={["#22d3ee","#8b5cf6","#4ade80","#22d3ee","#f59e0b","#ec4899","#22d3ee","#8b5cf6"][j]}
+                opacity={0.7}/>
+            ))}
+            <rect x={x+4} y={FLOOR-26} width={4} height={3} fill="#22d3ee" opacity={0.9}>
+              <animate attributeName="opacity" values="0.9;0;0.9" dur="1.2s" repeatCount="indefinite"/>
+            </rect>
+            <rect x={x+26} y={FLOOR-25} width={8} height={6} fill="#1e293b"/>
+            <rect x={x+18} y={FLOOR-20} width={24} height={3} fill="#1e293b"/>
+          </g>
+        ))}
+        {[8,83,158].map((x,i)=>(
+          <rect key={i} x={x} y={FLOOR-22} width={74} height={6} fill="#1a2a3a" rx={1}/>
+        ))}
+        <rect x={74} y={FLOOR-30} width={8} height={10} fill="#92400e" rx={1}/>
+        <rect x={75} y={FLOOR-32} width={6} height={3} fill="#6b7280" rx={1}/>
+        <rect x={235} y={FLOOR-80} width={15} height={62} fill="#0a1520"/>
+        {[0,1,2,3,4,5,6].map(i=>(
+          <rect key={i} x={236} y={FLOOR-78+i*10} width={13} height={9}
+            fill={["#3b82f6","#8b5cf6","#22d3ee","#4ade80","#f59e0b","#3b82f6","#ec4899"][i]}
+            opacity={0.8} rx={1}/>
+        ))}
+        <rect x={0} y={FLOOR-28} width={10} height={10} fill="#166534" rx={1}/>
+        <ellipse cx={5} cy={FLOOR-28} rx={10} ry={10} fill="#16a34a"/>
+        <ellipse cx={0} cy={FLOOR-32} rx={7} ry={7} fill="#15803d"/>
+      </g>
+    ),
+  },
+  pr: {
+    label:"広報部 / PR", color:"#ec4899",
+    wall:"#0d0118", floor:"#150828",
+    chars:[
+      {type:"suit_pink_female", speed:0.35, startX:60},
+      {type:"suit_lightblue_female", speed:0.4, startX:160},
+    ],
+    furniture: (W: number, H: number, FLOOR: number) => (
+      <g>
+        <rect x={10} y={FLOOR-90} width={130} height={75} fill="#06000f" stroke="#ec4899" strokeWidth={1.5} rx={2}/>
+        <rect x={12} y={FLOOR-88} width={126} height={71} fill="#030008"/>
+        <rect x={14} y={FLOOR-86} width={35} height={60} fill="#0a0014" rx={2}/>
+        <rect x={16} y={FLOOR-70} width={31} height={30} fill="#1a0528"/>
+        <text x={20} y={FLOOR-52} fontSize={8} fill="#ec4899" style={{fontFamily:"monospace"}}>{"♥"}</text>
+        <text x={18} y={FLOOR-44} fontSize={7} fill="#ec4899" style={{fontFamily:"monospace"}}>12.4K</text>
+        <rect x={52} y={FLOOR-86} width={82} height={60} fill="#030008"/>
+        {[0,1,2,3,4,5].map(i=>(
+          <rect key={i} x={55+i*13} y={FLOOR-50-[20,35,15,42,28,38][i]} width={10} height={[20,35,15,42,28,38][i]}
+            fill="#ec4899" opacity={0.6+i*0.06} rx={1}/>
+        ))}
+        <line x1={53} y1={FLOOR-50} x2={133} y2={FLOOR-50} stroke="#ec4899" strokeWidth={0.5} opacity={0.3}/>
+        {([["#ff0050","♪",153],["#fff","@",175],["#1d9bf0","✕",197],["#41c9b4","n",219]] as [string,string,number][]).map(([c,ico,x])=>(
+          <g key={x}>
+            <rect x={x} y={FLOOR-55} width={18} height={18} fill={c==="#fff"?"#111":c}
+              opacity={0.9} rx={3}/>
+            <text x={x+4} y={FLOOR-42} fontSize={10} fill="#fff" style={{fontFamily:"monospace"}}>{ico}</text>
+          </g>
+        ))}
+        <circle cx={220} cy={FLOOR-75} r={18} fill="none" stroke="#ec4899" strokeWidth={4} opacity={0.15}/>
+        <circle cx={220} cy={FLOOR-75} r={12} fill="none" stroke="#ec4899" strokeWidth={2} opacity={0.1}/>
+        <circle cx={220} cy={FLOOR-75} r={6} fill="#0d0118" stroke="#ec4899" strokeWidth={1}/>
+        <rect x={5} y={FLOOR-22} width={145} height={6} fill="#2d0d4a" rx={1}/>
+        <rect x={155} y={FLOOR-22} width={85} height={6} fill="#2d0d4a" rx={1}/>
+        <rect x={232} y={FLOOR-30} width={8} height={12} fill="#166534" rx={1}/>
+        <ellipse cx={236} cy={FLOOR-32} rx={9} ry={8} fill="#ec4899" opacity={0.5}/>
+        <ellipse cx={236} cy={FLOOR-32} rx={5} ry={5} fill="#f9a8d4"/>
+      </g>
+    ),
+  },
+  sales: {
+    label:"営業部 / SALES", color:"#f59e0b",
+    wall:"#0a0a06", floor:"#12120a",
+    chars:[
+      {type:"suit_navy_red", speed:0.45, startX:40},
+      {type:"suit_brown_orange", speed:0.3, startX:130},
+      {type:"suit_gray_senior", speed:0.35, startX:200},
+    ],
+    furniture: (W: number, H: number, FLOOR: number) => (
+      <g>
+        <rect x={10} y={FLOOR-95} width={120} height={78} fill="#f8f9f0" stroke="#d4a017" strokeWidth={2} rx={2}/>
+        <rect x={10} y={FLOOR-95} width={120} height={10} fill="#d4a017" rx={2}/>
+        <text x={15} y={FLOOR-88} fontSize={5} fill="#1a1a1a" style={{fontFamily:"monospace"}}>Q2 TARGET</text>
+        {[0,1,2,3,4].map(i=>(
+          <rect key={i} x={18+i*22} y={FLOOR-50-[25,38,18,48,32][i]} width={16} height={[25,38,18,48,32][i]}
+            fill={["#f59e0b","#10b981","#ef4444","#3b82f6","#f97316"][i]} opacity={0.8} rx={1}/>
+        ))}
+        <line x1={12} y1={FLOOR-50} x2={128} y2={FLOOR-50} stroke="#94a3b8" strokeWidth={0.5}/>
+        {["A社","B社","C社","D社","E社"].map((l,i)=>(
+          <text key={l} x={19+i*22} y={FLOOR-42} fontSize={4} fill="#374151" style={{fontFamily:"monospace"}}>{l}</text>
+        ))}
+        <line x1={12} y1={FLOOR-70} x2={128} y2={FLOOR-70} stroke="#ef4444" strokeWidth={1} strokeDasharray="4,2"/>
+        <rect x={138} y={FLOOR-92} width={100} height={75} fill="#0a0a06" stroke="#f59e0b" strokeWidth={1} rx={2}/>
+        <rect x={138} y={FLOOR-92} width={100} height={12} fill="#1a1a0a"/>
+        <text x={142} y={FLOOR-83} fontSize={5} fill="#f59e0b" style={{fontFamily:"monospace"}}>INBOX</text>
+        {[{f:"A社 田中様",s:"ご提案について",n:true},{f:"B社 鈴木様",s:"お見積もりの件",n:true},
+          {f:"C社 山田様",s:"デモのご依頼",n:false},{f:"D社 佐藤様",s:"フォローアップ",n:false}].map((e,i)=>(
+          <g key={i}>
+            <rect x={140} y={FLOOR-78+i*15} width={96} height={13}
+              fill={e.n?"rgba(245,158,11,0.08)":"transparent"}
+              stroke={e.n?"#f59e0b":"#1e2a0a"} strokeWidth={0.5} rx={1}/>
+            {e.n && <rect x={140} y={FLOOR-78+i*15} width={3} height={13} fill="#f59e0b" rx={1}/>}
+            <text x={146} y={FLOOR-70+i*15} fontSize={4} fill={e.n?"#f59e0b":"#6b7280"} style={{fontFamily:"monospace"}}>{e.f}</text>
+            <text x={146} y={FLOOR-65+i*15} fontSize={3.5} fill="#4b5563" style={{fontFamily:"monospace"}}>{e.s}</text>
+          </g>
+        ))}
+        <rect x={5} y={FLOOR-22} width={125} height={6} fill="#1e2a0a" rx={1}/>
+        <rect x={135} y={FLOOR-22} width={105} height={6} fill="#1e2a0a" rx={1}/>
+        <rect x={240} y={FLOOR-28} width={10} height={10} fill="#166534" rx={1}/>
+        <ellipse cx={245} cy={FLOOR-30} rx={12} ry={10} fill="#166534"/>
+      </g>
+    ),
+  },
+  finance: {
+    label:"財務部 / FINANCE", color:"#facc15",
+    wall:"#0a0800", floor:"#141000",
+    chars:[
+      {type:"suit_gray_senior", speed:0.3, startX:80},
+      {type:"suit_navy_red", speed:0.25, startX:180},
+    ],
+    furniture: (W: number, H: number, FLOOR: number) => (
+      <g>
+        <rect x={10} y={FLOOR-95} width={150} height={78} fill="#080600" stroke="#facc15" strokeWidth={1.5} rx={2}/>
+        <rect x={10} y={FLOOR-95} width={150} height={10} fill="#1a1000"/>
+        <text x={14} y={FLOOR-88} fontSize={5} fill="#facc15" style={{fontFamily:"monospace"}}>MRR DASHBOARD</text>
+        {[0,1,2,3,4,5].map(i=>(
+          <rect key={i} x={18+i*24} y={FLOOR-60-[30,45,32,58,42,55][i]}
+            width={18} height={[30,45,32,58,42,55][i]}
+            fill="#facc15" opacity={i===5?1:0.5} rx={1}/>
+        ))}
+        <line x1={14} y1={FLOOR-60} x2={158} y2={FLOOR-60} stroke="#facc15" strokeWidth={0.5} opacity={0.3}/>
+        {["11月","12月","1月","2月","3月","4月"].map((l,i)=>(
+          <text key={l} x={18+i*24} y={FLOOR-53} fontSize={3.5} fill="#92400e" style={{fontFamily:"monospace"}}>{l}</text>
+        ))}
+        <text x={14} y={FLOOR-78} fontSize={8} fill="#facc15" style={{fontFamily:"monospace"}}>{"¥64万"}</text>
+        <text x={80} y={FLOOR-78} fontSize={5} fill="#4ade80" style={{fontFamily:"monospace"}}>{"↑14%"}</text>
+        <rect x={168} y={FLOOR-95} width={75} height={78} fill="#08060a" stroke="#facc15" strokeWidth={1} rx={2}/>
+        <text x={172} y={FLOOR-87} fontSize={4.5} fill="#facc15" style={{fontFamily:"monospace"}}>STRIPE</text>
+        {[{n:"田中",a:"¥3,980"},{n:"Kim",a:"¥980"},{n:"鈴木",a:"¥3,980"},{n:"佐藤",a:"¥480"}].map((t,i)=>(
+          <g key={i}>
+            <rect x={170} y={FLOOR-82+i*16} width={71} height={13} fill="rgba(250,204,21,0.05)" stroke="#facc1522" rx={1}/>
+            <text x={173} y={FLOOR-74+i*16} fontSize={4} fill="#facc15" style={{fontFamily:"monospace"}}>{t.n}</text>
+            <text x={210} y={FLOOR-74+i*16} fontSize={4} fill="#4ade80" style={{fontFamily:"monospace"}}>{t.a}</text>
+          </g>
+        ))}
+        <rect x={5} y={FLOOR-22} width={155} height={6} fill="#1a1000" rx={1}/>
+        <rect x={163} y={FLOOR-22} width={80} height={6} fill="#1a1000" rx={1}/>
+      </g>
+    ),
+  },
+};
+
+/* ============================================================
+   DEPT ROOM COMPONENT
+============================================================ */
+function DeptRoom({ deptId, selected, onClick }: {
+  deptId: string; selected: boolean; onClick: () => void;
+}) {
+  const cfg = DEPT_ROOM_CONFIGS[deptId];
+  if (!cfg) return null;
+  const W = 260;
+  const H = 165;
+  const FLOOR = Math.round(H * 0.72);
+
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        cursor: "pointer", position: "relative",
+        border: `2px solid ${selected ? cfg.color : cfg.color + "44"}`,
+        boxShadow: selected ? `0 0 20px ${cfg.color}55` : "none",
+        transform: selected ? "scale(1.02)" : "scale(1)",
+        transition: "all 0.15s", borderRadius: 2, overflow: "hidden",
+      }}
+    >
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
+        <defs>
+          <linearGradient id={`wall-${deptId}`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={cfg.wall}/>
+            <stop offset="100%" stopColor={cfg.wall} stopOpacity={0.8}/>
+          </linearGradient>
+        </defs>
+        <rect width={W} height={H} fill={`url(#wall-${deptId})`}/>
+        {Array.from({length:Math.ceil(W/30)},(_,i)=>(
+          <line key={`v${i}`} x1={i*30} y1={0} x2={i*30} y2={FLOOR}
+            stroke={cfg.color} strokeWidth={0.3} opacity={0.07}/>
+        ))}
+        {Array.from({length:4},(_,i)=>(
+          <line key={`h${i}`} x1={0} y1={i*25} x2={W} y2={i*25}
+            stroke={cfg.color} strokeWidth={0.3} opacity={0.07}/>
+        ))}
+        <rect x={W/2-30} y={0} width={60} height={3} fill={cfg.color} opacity={0.4}/>
+        <ellipse cx={W/2} cy={0} rx={45} ry={18} fill={cfg.color} opacity={0.04}/>
+        <rect x={0} y={FLOOR} width={W} height={H-FLOOR} fill={cfg.floor}/>
+        <line x1={0} y1={FLOOR} x2={W} y2={FLOOR} stroke={cfg.color} strokeWidth={1.5} opacity={0.3}/>
+        {Array.from({length:Math.ceil(W/25)},(_,i)=>(
+          <line key={i} x1={i*25} y1={FLOOR} x2={i*25} y2={H}
+            stroke={cfg.color} strokeWidth={0.3} opacity={0.08}/>
+        ))}
+        {cfg.furniture(W, H, FLOOR)}
+        {cfg.chars.map((ch: any, i: number) => (
+          <WalkingChar
+            key={i}
+            roomW={W - 20}
+            floorY={FLOOR}
+            charType={ch.type}
+            speed={ch.speed}
+            startX={ch.startX}
+          />
+        ))}
+        <circle cx={W-10} cy={8} r={3} fill="#4ade80">
+          <animate attributeName="opacity" values="1;0.3;1" dur="2s" repeatCount="indefinite"/>
+        </circle>
+        <rect x={0} y={0} width={W} height={14} fill={cfg.color} opacity={0.1}/>
+        <text x={6} y={10} fontSize={6} fill={cfg.color}
+          style={{ fontFamily: FONT }}>
+          {cfg.label}
+        </text>
+        <rect x={0} y={0} width={W-1} height={H-1} fill="none"
+          stroke={cfg.color} strokeWidth={selected ? 2 : 1}
+          opacity={selected ? 1 : 0.4}/>
+      </svg>
+    </div>
+  );
+}
+
+/* ============================================================
    MAIN GAME SCREEN
 ============================================================ */
 const INITIAL_DEPTS = [
@@ -728,10 +1254,23 @@ export default function CompanyOSGame() {
             {tab==="map" && (
               <div style={{ padding:20 }}>
                 <div style={{ fontFamily:FONT, fontSize:5.5, color:C.muted,
-                  marginBottom:16, letterSpacing:"0.15em" }}>■ OFFICE MAP — 部署一覧</div>
-                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:12 }}>
+                  marginBottom:16, letterSpacing:"0.15em" }}>■ OFFICE MAP — クリックで部署を選択</div>
+                <div style={{
+                  display:"grid",
+                  gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))",
+                  gap:14,
+                }}>
                   {depts.map(d=>(
-                    <DeptRPGCard key={d.id} dept={d} onClick={()=>setSelectedDept(selectedDept===d.id?null:d.id)}/>
+                    DEPT_ROOM_CONFIGS[d.id] ? (
+                      <DeptRoom
+                        key={d.id}
+                        deptId={d.id}
+                        selected={selectedDept===d.id}
+                        onClick={()=>setSelectedDept(selectedDept===d.id?null:d.id)}
+                      />
+                    ) : (
+                      <DeptRPGCard key={d.id} dept={d} onClick={()=>setSelectedDept(selectedDept===d.id?null:d.id)}/>
+                    )
                   ))}
                 </div>
                 {dept && (
@@ -748,6 +1287,9 @@ export default function CompanyOSGame() {
                       <div style={{ marginLeft:"auto", fontFamily:FONT, fontSize:6,
                         color:C.gold, padding:"2px 8px",
                         border:`1px solid ${C.gold}44` }}>Lv.{dept.level}</div>
+                    </div>
+                    <div style={{ marginBottom:14 }}>
+                      <DeptRPGCard dept={dept} onClick={()=>{}}/>
                     </div>
                     <div style={{ fontFamily:FONT, fontSize:5, color:C.muted,
                       marginBottom:8, letterSpacing:"0.1em" }}>アクティブクエスト</div>

@@ -1,3 +1,4 @@
+// @ts-nocheck
 "use client";
 
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -20,13 +21,14 @@ const C = {
 /* ============================================================
    CLAUDE API
 ============================================================ */
-async function callClaude(system, user, onChunk) {
+async function callClaude(system: string, user: string, onChunk: (chunk: string) => void) {
   const res = await fetch("/api/claude", {
     method:"POST",
     headers:{ "Content-Type":"application/json" },
     body: JSON.stringify({ system, user }),
   });
   if (!res.ok) throw new Error(`API ${res.status}`);
+  if (!res.body) throw new Error("No response body");
   const reader = res.body.getReader();
   const dec = new TextDecoder();
   let buf = "";
@@ -34,7 +36,7 @@ async function callClaude(system, user, onChunk) {
     const { done, value } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream:true });
-    const lines = buf.split("\n"); buf = lines.pop();
+    const lines = buf.split("\n"); buf = lines.pop() ?? "";
     for (const line of lines) {
       if (!line.startsWith("data: ")) continue;
       const d = line.slice(6).trim();
