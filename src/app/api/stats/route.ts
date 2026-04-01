@@ -11,7 +11,6 @@ function getEnv(key: string): string {
   } catch { return ""; }
 }
 
-// ── Stripe API ──
 async function stripeFetch(path: string) {
   const key = getEnv("STRIPE_SECRET_KEY");
   if (!key) throw new Error("STRIPE_SECRET_KEY not set");
@@ -22,7 +21,6 @@ async function stripeFetch(path: string) {
   return res.json();
 }
 
-// ── Supabase API ──
 async function supaFetch(path: string) {
   const url = getEnv("SUPABASE_URL");
   const key = getEnv("SUPABASE_SERVICE_KEY");
@@ -34,101 +32,144 @@ async function supaFetch(path: string) {
   return res.json();
 }
 
+// ── API cost per video generation job ──
+// Runway Gen-4: ~$0.50/5s = ¥75, Kling: ~$0.30/5s = ¥45
+// ElevenLabs TTS: ~$0.30/1000chars = ¥45
+// Average per job (video + narration): ~¥120
+const COST_PER_VIDEO_JOB = 120;
+
+// ── Anthropic Claude cost ──
+// Sonnet: $3/1M input, $15/1M output ≈ ¥2.5/1K tokens avg
+// Estimate per callClaude invocation: ~800 tokens = ¥2
+const COST_PER_CLAUDE_CALL = 2;
+
+// ── 月額サブスクリプション (固定費) ──
+// ※ 実際に契約しているプランを反映。変更時はここを更新。
+const SUBSCRIPTIONS = [
+  { id: "claude_max",   name: "Claude Max",          monthly: 14400, note: "$100/mo" },
+  { id: "runway",       name: "Runway Standard",     monthly: 4350,  note: "$30/mo" },
+  { id: "elevenlabs",   name: "ElevenLabs Starter",  monthly: 750,   note: "$5/mo" },
+  { id: "supabase",     name: "Supabase Free",       monthly: 0,     note: "Free tier" },
+  { id: "vercel",       name: "Vercel Hobby",        monthly: 0,     note: "Free tier" },
+  { id: "r2",           name: "Cloudflare R2",       monthly: 50,    note: "~2GB stored" },
+  { id: "domain",       name: "ドメイン (.com)",      monthly: 150,   note: "~¥1,800/year" },
+];
+const TOTAL_SUBSCRIPTIONS = SUBSCRIPTIONS.reduce((s, sub) => s + sub.monthly, 0);
+
 export async function GET() {
   try {
     const now = new Date();
     const todayStart = Math.floor(new Date(now.toISOString().slice(0, 10)).getTime() / 1000);
     const monthStart = Math.floor(new Date(now.toISOString().slice(0, 7) + "-01").getTime() / 1000);
+    const todayStr = now.toISOString().slice(0, 10);
 
-    // Parallel fetch: Stripe + Supabase
-    const [charges, balanceTxns, balance, users, creditTxns] = await Promise.all([
+    const [charges, balanceTxns, balance, users, creditTxns, jobs] = await Promise.all([
       stripeFetch("charges?limit=100"),
-      stripeFetch(`balance_transactions?limit=100&created[gte]=${monthStart}`),
+      stripeFetch(`balance_transactions?limit=100`),
       stripeFetch("balance"),
       supaFetch("users?select=id,plan,created_at"),
-      supaFetch("credit_transactions?select=type,amount,created_at&order=created_at.desc&limit=200"),
+      supaFetch("credit_transactions?select=type,amount,created_at&order=created_at.desc&limit=500"),
+      supaFetch("jobs?select=id,status,created_at&order=created_at.desc&limit=500"),
     ]);
 
-    // ── Revenue from Stripe (source of truth) ──
-    const succeededCharges = (charges.data || []).filter((c: { status: string }) => c.status === "succeeded");
-    const totalRevenue = succeededCharges.reduce((s: number, c: { amount: number }) => s + c.amount, 0);
-    const todayCharges = succeededCharges.filter((c: { created: number }) => c.created >= todayStart);
-    const todayRevenue = todayCharges.reduce((s: number, c: { amount: number }) => s + c.amount, 0);
-    const monthCharges = succeededCharges.filter((c: { created: number }) => c.created >= monthStart);
-    const monthRevenue = monthCharges.reduce((s: number, c: { amount: number }) => s + c.amount, 0);
+    // ══ REVENUE (Stripe = source of truth) ══
+    const succeeded = (charges.data || []).filter((c: { status: string }) => c.status === "succeeded");
+    const totalRevenue = succeeded.reduce((s: number, c: { amount: number }) => s + c.amount, 0);
+    const todayRevenue = succeeded
+      .filter((c: { created: number }) => c.created >= todayStart)
+      .reduce((s: number, c: { amount: number }) => s + c.amount, 0);
+    const monthRevenue = succeeded
+      .filter((c: { created: number }) => c.created >= monthStart)
+      .reduce((s: number, c: { amount: number }) => s + c.amount, 0);
 
-    // ── Stripe fees (actual cost from Stripe) ──
-    const totalFees = (balanceTxns.data || []).reduce((s: number, t: { fee: number }) => s + t.fee, 0);
-    const todayFees = (balanceTxns.data || [])
+    // ══ STRIPE FEES (actual) ══
+    const allTxns = balanceTxns.data || [];
+    const monthTxns = allTxns.filter((t: { created: number }) => t.created >= monthStart);
+    const totalFees = allTxns.reduce((s: number, t: { fee: number }) => s + t.fee, 0);
+    const monthFees = monthTxns.reduce((s: number, t: { fee: number }) => s + t.fee, 0);
+    const todayFees = allTxns
       .filter((t: { created: number }) => t.created >= todayStart)
       .reduce((s: number, t: { fee: number }) => s + t.fee, 0);
+    const totalNet = allTxns.reduce((s: number, t: { net: number }) => s + t.net, 0);
 
-    // ── Net from Stripe ──
-    const totalNet = (balanceTxns.data || []).reduce((s: number, t: { net: number }) => s + t.net, 0);
-
-    // ── Stripe Balance ──
+    // ══ STRIPE BALANCE ══
     const availableBalance = (balance.available || []).reduce((s: number, b: { amount: number }) => s + b.amount, 0);
     const pendingBalance = (balance.pending || []).reduce((s: number, b: { amount: number }) => s + b.amount, 0);
 
-    // ── Users from Supabase ──
-    const todayStr = now.toISOString().slice(0, 10);
+    // ══ USERS (Supabase) ══
     const totalUsers = users.length;
     const todayUsers = users.filter((u: { created_at: string }) => u.created_at.startsWith(todayStr)).length;
-    const planBreakdown = users.reduce((acc: Record<string, number>, u: { plan: string }) => {
+    const plans = users.reduce((acc: Record<string, number>, u: { plan: string }) => {
       acc[u.plan] = (acc[u.plan] || 0) + 1;
       return acc;
     }, {} as Record<string, number>);
 
-    // ── Credit usage from Supabase ──
-    const totalCreditsUsed = (creditTxns || [])
-      .filter((t: { type: string }) => t.type === "consume")
-      .reduce((s: number, t: { amount: number }) => s + Math.abs(t.amount), 0);
+    // ══ API COSTS (calculated from actual usage) ══
 
-    // ── API cost estimate (Anthropic, Runway, etc.) ──
-    // Rough: ¥3 per credit for video gen API costs
-    const apiCostEstimate = Math.round(totalCreditsUsed * 3);
+    // Video generation jobs → Runway/Kling cost
+    const completedJobs = (jobs || []).filter((j: { status: string }) => j.status === "done" || j.status === "preview_done");
+    const videoApiCost = completedJobs.length * COST_PER_VIDEO_JOB;
+
+    // Claude API calls (estimate from credit consume transactions = 1 call per consume)
+    const consumeTxns = (creditTxns || []).filter((t: { type: string }) => t.type === "consume");
+    const claudeApiCost = consumeTxns.length * COST_PER_CLAUDE_CALL;
+
+    // Total variable API costs (per-use)
+    const variableApiCost = videoApiCost + claudeApiCost;
+
+    // ══ TOTAL COSTS ══
+    const totalCost = totalFees + variableApiCost + TOTAL_SUBSCRIPTIONS;
 
     return NextResponse.json({
-      // Stripe revenue (source of truth)
       revenue: {
         total: totalRevenue,
         today: todayRevenue,
         month: monthRevenue,
-        charges: succeededCharges.length,
-        todayCharges: todayCharges.length,
-        monthCharges: monthCharges.length,
+        charges: succeeded.length,
       },
-      // Stripe fees & net
       stripe: {
         fees: totalFees,
+        monthFees,
         todayFees,
         net: totalNet,
         availableBalance,
         pendingBalance,
+        feeRate: totalRevenue > 0 ? Math.round(totalFees / totalRevenue * 1000) / 10 : 0,
       },
-      // Users from Supabase
       users: {
         total: totalUsers,
         today: todayUsers,
-        plans: planBreakdown,
+        plans,
       },
-      // Credit usage
-      credits: {
-        totalUsed: totalCreditsUsed,
-        transactions: (creditTxns || []).length,
+      apiCosts: {
+        video: { jobs: completedJobs.length, cost: videoApiCost, label: "Runway/Kling 動画生成" },
+        claude: { calls: consumeTxns.length, cost: claudeApiCost, label: "Claude API (従量)" },
+        variableTotal: variableApiCost,
       },
-      // Combined costs
+      subscriptions: {
+        items: SUBSCRIPTIONS,
+        total: TOTAL_SUBSCRIPTIONS,
+      },
       cost: {
         stripeFees: totalFees,
-        apiEstimate: apiCostEstimate,
-        total: totalFees + apiCostEstimate,
+        variableApi: variableApiCost,
+        subscriptions: TOTAL_SUBSCRIPTIONS,
+        total: totalCost,
       },
-      // Profit
       profit: {
         gross: totalRevenue,
-        net: totalRevenue - totalFees - apiCostEstimate,
+        net: totalRevenue - totalCost,
         today: todayRevenue - todayFees,
+        month: monthRevenue - monthFees - variableApiCost - TOTAL_SUBSCRIPTIONS,
         stripeNet: totalNet,
+      },
+      usage: {
+        creditsConsumed: consumeTxns.reduce((s: number, t: { amount: number }) => s + Math.abs(t.amount), 0),
+        creditsRefunded: (creditTxns || [])
+          .filter((t: { type: string }) => t.type === "refund")
+          .reduce((s: number, t: { amount: number }) => s + Math.abs(t.amount), 0),
+        videoJobs: completedJobs.length,
+        totalTransactions: (creditTxns || []).length,
       },
       updatedAt: now.toISOString(),
     });

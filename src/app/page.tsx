@@ -450,7 +450,7 @@ function TodayScore({ revenue, cost, profit, target, stats }) {
       <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:6 }}>
         {[
           {label:"ユーザー",value:stats?`${stats.users.total}人`:"—",color:C.blue,id:"users"},
-          {label:"取引数",value:stats?`${stats.credits.transactions}件`:"—",color:C.purple,id:"txns"},
+          {label:"動画生成",value:stats?`${stats.usage.videoJobs}本`:"—",color:C.purple,id:"txns"},
           {label:"購入数",value:stats?`${stats.revenue.purchases}件`:"—",color:C.green,id:"rev"},
         ].map(s=>(
           <div key={s.label} style={{ textAlign:"center", padding:"5px",
