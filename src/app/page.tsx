@@ -511,11 +511,23 @@ export default function CompanyOSv6(){
   const[screen,setScreen]        =useState<"tasks"|"sns"|"scheduler"|"agents"|"health">("tasks");
   const[goalInput,setGoalInput]  =useState("");
   const[priority,setPriority]    =useState<Priority>("high");
-  const[autoApprove,setAutoApprove]=useState(true); // デフォルトON
+  const[autoApprove,setAutoApprove]=useState(true);
   const[cmdOpen,setCmdOpen]      =useState(false);
   const[posts,setPosts]          =useState<SNSPost[]>([]);
   const[totalXP,setTotalXP]      =useState(14820);
   const[xpFlash,setXpFlash]      =useState(false);
+  const[liveStats,setLiveStats]  =useState<any>(null);
+
+  // Fetch real data from Stripe + Supabase
+  useEffect(()=>{
+    const fetchStats=async()=>{
+      try{ const r=await fetch("/api/stats"); if(r.ok) setLiveStats(await r.json()); }catch{}
+    };
+    fetchStats();
+    const i=setInterval(fetchStats,60000);
+    return()=>clearInterval(i);
+  },[]);
+
   const[schedules,setSchedules]  =useState<Schedule[]>([
     {id:"1",name:"週次戦略会議",goal:"今週の状況を分析して戦略を立ててください",agent:"ceo",label:"毎週月曜 9:00",enabled:true,runs:14,next:now()+86400000*2},
     {id:"2",name:"日次SNS計画",goal:"今日のSNS投稿コンテンツを全プラットフォーム向けに生成してください",agent:"pr",label:"毎日 8:00",enabled:true,runs:52},
@@ -846,6 +858,41 @@ export default function CompanyOSv6(){
             {screen==="health"&&(
               <div style={{flex:1,overflow:"auto",padding:16}}>
                 <div style={{fontFamily:FONT,fontSize:5.5,color:C.red,marginBottom:14}}>❤ システムヘルス</div>
+
+                {/* Live Revenue from Stripe + Supabase */}
+                {liveStats&&(
+                  <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8,marginBottom:14}}>
+                    {[
+                      {l:"Stripe売上",v:`¥${liveStats.revenue.total.toLocaleString()}`,c:C.green,i:"💰"},
+                      {l:"コスト合計",v:`¥${liveStats.cost.total.toLocaleString()}`,c:C.red,i:"📉"},
+                      {l:"純利益",v:`¥${liveStats.profit.net.toLocaleString()}`,c:liveStats.profit.net>=0?C.green:C.red,i:liveStats.profit.net>=0?"📈":"⚠"},
+                      {l:"ユーザー",v:`${liveStats.users.total}人`,c:C.blue,i:"👥"},
+                    ].map(m=>(
+                      <div key={m.l} style={{padding:"11px 8px",background:C.card,border:`1px solid ${m.c}33`,borderRadius:3,textAlign:"center"}}>
+                        <div style={{fontSize:12,marginBottom:3}}>{m.i}</div>
+                        <div style={{fontFamily:FONT,fontSize:10,color:m.c,marginBottom:3}}>{m.v}</div>
+                        <div style={{fontFamily:MONO,fontSize:8.5,color:C.muted}}>{m.l}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {liveStats&&(
+                  <div style={{marginBottom:14,padding:"12px 16px",background:C.card,border:`1px solid ${C.gold}33`,borderRadius:3}}>
+                    <div style={{fontFamily:FONT,fontSize:4.5,color:C.gold,marginBottom:8}}>💳 月額サブスクリプション</div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+                      {liveStats.subscriptions.items.filter((s:any)=>s.monthly>0).map((s:any)=>(
+                        <div key={s.id} style={{padding:"6px 10px",background:C.surface,borderRadius:2,display:"flex",justifyContent:"space-between"}}>
+                          <span style={{fontFamily:MONO,fontSize:10,color:C.text}}>{s.name}</span>
+                          <span style={{fontFamily:FONT,fontSize:5,color:C.orange}}>¥{s.monthly.toLocaleString()}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div style={{marginTop:8,fontFamily:FONT,fontSize:5,color:C.orange,textAlign:"right"}}>
+                      合計: ¥{liveStats.subscriptions.total.toLocaleString()}/月
+                    </div>
+                  </div>
+                )}
+
                 <HealthPanel tasks={tasks} posts={posts} schedules={schedules}/>
                 <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
                   {[
