@@ -1,1485 +1,885 @@
-// @ts-nocheck
 "use client";
+// @ts-nocheck
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 
-/* ============================================================
-   DESIGN TOKENS
-============================================================ */
+/* ─── DESIGN ─── */
 const FONT = "'Press Start 2P', monospace";
 const MONO = "'DM Mono', monospace";
+const SANS = "'Outfit', sans-serif";
 const C = {
-  bg:"#020508", panel:"#060d14", border:"#0a2030",
-  gold:"#fbbf24", goldDim:"#92400e",
-  green:"#4ade80", greenDim:"#14532d",
-  red:"#f87171", redDim:"#7f1d1d",
-  blue:"#38bdf8", blueDim:"#0c4a6e",
-  purple:"#c084fc", purpleDim:"#4a1d96",
-  orange:"#fb923c",
-  text:"#e2e8f0", muted:"#475569", dim:"#1e293b",
-  hp:"#22c55e", mp:"#818cf8", xp:"#f59e0b",
+  bg:"#020509",surface:"#050c18",card:"#08111f",border:"#0c1e38",glow:"#0e2d50",
+  gold:"#f5c518",green:"#00f0a0",red:"#ff3d5a",blue:"#1ad8ff",purple:"#b06eff",
+  orange:"#ff8800",pink:"#ff2d9a",teal:"#00ddc8",lime:"#9fff2e",
+  text:"#dff0ff",muted:"#3a5570",dim:"#0f1e30",
 };
 
-/* ============================================================
-   CLAUDE API (via server-side proxy)
-============================================================ */
-async function callClaude(system: string, user: string, onChunk: (chunk: string) => void) {
-  const res = await fetch("/api/claude", {
-    method:"POST",
-    headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({ system, user }),
+/* ─── CLAUDE API ─── */
+async function stream(system:string,msgs:{role:string;content:string}[],onChunk:(t:string)=>void,max=1000){
+  const res=await fetch("/api/claude",{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({system,user:msgs[msgs.length-1].content}),
   });
-  if(!res.ok) throw new Error(`API ${res.status}`);
-  if(!res.body) throw new Error("No response body");
-  const reader=res.body.getReader(); const dec=new TextDecoder(); let buf="";
+  if(!res.ok)throw new Error(`${res.status}`);
+  const reader=res.body!.getReader();const dec=new TextDecoder();let buf="";
   while(true){
-    const{done,value}=await reader.read(); if(done) break;
+    const{done,value}=await reader.read();if(done)break;
     buf+=dec.decode(value,{stream:true});
-    const lines=buf.split("\n"); buf=lines.pop() ?? "";
+    const lines=buf.split("\n");buf=lines.pop()!;
     for(const line of lines){
-      if(!line.startsWith("data: ")) continue;
-      const d=line.slice(6).trim(); if(d==="[DONE]") return;
+      if(!line.startsWith("data: "))continue;
+      const d=line.slice(6).trim();if(d==="[DONE]")return;
       try{const j=JSON.parse(d);if(j.delta?.text)onChunk(j.delta.text);}catch{}
     }
   }
 }
-
-/* ============================================================
-   ANIMATED COUNTER
-============================================================ */
-function Counter({ target, prefix="", suffix="", color, size=14, duration=1200 }) {
-  const [val, setVal] = useState(0);
-  const start = useRef(Date.now());
-  useEffect(() => {
-    start.current = Date.now();
-    const tick = () => {
-      const elapsed = Date.now() - start.current;
-      const progress = Math.min(elapsed / duration, 1);
-      const ease = 1 - Math.pow(1 - progress, 3);
-      setVal(Math.floor(ease * target));
-      if (progress < 1) requestAnimationFrame(tick);
-      else setVal(target);
-    };
-    requestAnimationFrame(tick);
-  }, [target, duration]);
-  return (
-    <span style={{ fontFamily:FONT, fontSize:size, color,
-      textShadow:`0 0 12px ${color}88`, letterSpacing:"0.05em" }}>
-      {prefix}{val.toLocaleString()}{suffix}
-    </span>
-  );
+async function ask(sys:string,user:string,max=700):Promise<string>{
+  let r="";await stream(sys,[{role:"user",content:user}],c=>{r+=c;},max);return r;
+}
+async function askJSON<T>(sys:string,user:string):Promise<T|null>{
+  const raw=await ask(sys+"\nJSONのみ返してください。コードブロック不要。",user,900);
+  try{return JSON.parse(raw.replace(/```json|```/g,"").trim()) as T;}catch{return null;}
 }
 
-/* ============================================================
-   HP / MP / XP BAR
-============================================================ */
-function StatBar({ label, value, max, color, icon, showVal=true }) {
-  const pct = Math.min(value/max*100, 100);
-  const barColor = pct > 60 ? color : pct > 30 ? C.orange : C.red;
-  return (
-    <div style={{ marginBottom:6 }}>
-      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3, alignItems:"center" }}>
-        <span style={{ fontFamily:FONT, fontSize:4.5, color:C.muted }}>
-          {icon} {label}
-        </span>
-        {showVal && (
-          <span style={{ fontFamily:FONT, fontSize:4.5, color:barColor }}>
-            {value}/{max}
-          </span>
-        )}
-      </div>
-      <div style={{ height:8, background:"#0a1520", borderRadius:1, overflow:"hidden",
-        border:`1px solid ${color}33`, position:"relative" }}>
-        <div style={{
-          height:"100%", width:`${pct}%`, background:barColor,
-          boxShadow:`0 0 8px ${barColor}88`,
-          transition:"width 0.8s ease",
-          position:"relative",
-        }}>
-          <div style={{ position:"absolute", top:0, left:0, right:0, height:"40%",
-            background:"rgba(255,255,255,0.15)" }}/>
+/* ─── TYPES ─── */
+type AgentId="ceo"|"dev"|"qa"|"pr"|"sales"|"research"|"automation"|"analyst";
+type Priority="critical"|"high"|"normal"|"low";
+type TStatus="pending"|"running"|"done"|"failed"|"auto_approved"|"qa_running"|"qa_fixing";
+type Platform="tiktok"|"threads"|"x"|"note"|"instagram"|"youtube";
+
+interface Task{
+  id:string;goal:string;title:string;agent:AgentId;
+  status:TStatus;priority:Priority;output:string;
+  parent_id?:string;children_ids:string[];
+  logs:Log[];created_at:number;started_at?:number;done_at?:number;
+  xp:number;auto_approved:boolean;
+  qa_cycles:number;qa_passed:boolean;tags:string[];
+}
+interface Log{ts:number;type:string;text:string;}
+interface SNSPost{
+  id:string;platform:Platform;content:string;hashtags:string[];
+  status:"draft"|"scheduled"|"posted";scheduled_at?:number;
+  ai_score:number;likes:number;views:number;
+}
+interface Schedule{
+  id:string;name:string;goal:string;agent:AgentId;
+  label:string;enabled:boolean;runs:number;next?:number;
+}
+
+/* ─── AGENTS ─── */
+const AGENTS:Record<AgentId,{name:string;icon:string;color:string;role:string;level:number;sys:string}> = {
+  ceo:{name:"CEO AI",icon:"👑",color:C.gold,role:"戦略・分解・指揮",level:42,
+    sys:`あなたはスタートアップCEO AIです。目標を分析し最適なタスクに分解して各部署に割り振ります。
+部署: dev(実装), qa(テスト・修正), pr(SNS), sales(営業), research(調査), automation(自動化), analyst(分析)
+JSON配列で返してください: [{"agent":"agentId","title":"タスク名","description":"詳細","priority":"high","xp":150,"tags":["tag"]}]
+devタスクには必ず後続のqaタスクも追加してください。`},
+  dev:{name:"Dev AI",icon:"⌨",color:C.blue,role:"フルスタック実装",level:38,
+    sys:`あなたはシニアエンジニアAIです。Next.js 14+TypeScript+Supabase+Vercelで実装します。
+必ず: ①完全な型定義 ②エラーハンドリング ③パフォーマンス最適化 ④セキュリティ考慮
+ファイルパス付きの完全動作コードを提供してください。`},
+  qa:{name:"QA AI",icon:"🔬",color:C.purple,role:"自動テスト・バグ修正ループ",level:35,
+    sys:`あなたは自動QAエンジニアAIです。コードを徹底レビューしてバグを発見・修正します。
+JSONで返してください: {"bugs":[{"severity":"critical/high/medium","desc":"説明","fix":"修正内容"}],"test_code":"テストコード","deploy_ok":true,"fixed_code":"修正済みコード全体"}`},
+  pr:{name:"PR AI",icon:"◈",color:C.pink,role:"SNS・バイラル戦略",level:33,
+    sys:`あなたは日本トップSNSマーケターAIです。TikTok・Threads・X・note・Instagram・YouTube向けのバズるコンテンツを作ります。各投稿にAIバズ予測スコア(0-100)を付けてください。`},
+  sales:{name:"Sales AI",icon:"◆",color:C.orange,role:"BtoB営業・商談",level:28,
+    sys:`あなたは日本BtoB営業専門AIです。件名・本文・PS・フォローアップ3回分を一式提供します。返信率最大化の内容にしてください。`},
+  research:{name:"Research AI",icon:"🔭",color:"#22d3ee",role:"市場調査・競合分析",level:30,
+    sys:`あなたは市場調査専門AIです。具体的なデータ・数値・事例・アクション提言付きで調査結果をまとめてください。`},
+  automation:{name:"Auto AI",icon:"⚙",color:C.lime,role:"完全自動化・Bot",level:26,
+    sys:`あなたは業務自動化エンジニアAIです。Python・GitHub Actions・Supabase Edge Functionsで完全自動化します。エラーハンドリング・ログ・アラート込みで動作するコードを提供してください。`},
+  analyst:{name:"Data AI",icon:"📊",color:"#60a5fa",role:"KPI・データ分析",level:23,
+    sys:`あなたはビジネスアナリストAIです。売上・コスト・SNS指標を分析し、意思決定に直結するレポートを作成してください。`},
+};
+
+const PLATFORMS:{id:Platform;name:string;color:string;limit:number;icon:string}[]=[
+  {id:"tiktok",name:"TikTok",color:"#ff0050",limit:150,icon:"♪"},
+  {id:"threads",name:"Threads",color:"#e8e8e8",limit:500,icon:"@"},
+  {id:"x",name:"X",color:"#1d9bf0",limit:280,icon:"✕"},
+  {id:"note",name:"note",color:"#41c9b4",limit:5000,icon:"n"},
+  {id:"instagram",name:"Instagram",color:"#e1306c",limit:2200,icon:"◉"},
+  {id:"youtube",name:"YouTube",color:"#ff0000",limit:5000,icon:"▶"},
+];
+
+const QUICK:[string,string,string,Priority][]=[
+  ["📱","TikTokをバズらせたい","VideoTrackerの新機能をTikTokで最大限バズらせる戦略・投稿文・ハッシュタグ・スケジュールをすべて作成してください","high"],
+  ["💌","企業への営業メール","VideoTrackerをSaaS・動画制作・マーケ会社に営業するメール・戦略・フォローアップ計画を作成してください","high"],
+  ["📊","競合完全分析","CapCut・OpusClip等の競合を徹底分析して差別化戦略を提言してください","normal"],
+  ["🤖","SNS完全自動化","Threads・note・X・TikTokへの毎日自動投稿システムのコードを作成してください","high"],
+  ["⌨","新機能を実装","VideoTrackerにAIハイライト自動生成機能を実装してください","high"],
+  ["💰","収益を2倍に","3ヶ月でMRRを2倍にする戦略・実行計画・優先順位を作成してください","critical"],
+  ["📝","週次レポート","今週の売上・SNS・開発・商談をまとめたエグゼクティブレポートを作成してください","normal"],
+  ["🌐","Japan市場戦略","日本市場でVideoTrackerを1位にする包括的マーケ戦略を作成してください","high"],
+];
+
+/* ─── UTILS ─── */
+const uid=()=>Math.random().toString(36).slice(2,10);
+const now=()=>Date.now();
+const wait=(ms:number)=>new Promise(r=>setTimeout(r,ms));
+const ft=(ms:number)=>new Date(ms).toLocaleTimeString("ja-JP",{hour:"2-digit",minute:"2-digit",second:"2-digit"});
+
+/* ─── ATOMS ─── */
+const Glow=({color,size=8,pulse=false}:{color:string;size?:number;pulse?:boolean})=>(
+  <div style={{width:size,height:size,borderRadius:"50%",background:color,flexShrink:0,
+    boxShadow:`0 0 ${size}px ${color}, 0 0 ${size*2}px ${color}44`,
+    animation:pulse?"blink 1.8s infinite":"none"}}/>
+);
+const Tag=({children,color}:{children:React.ReactNode;color:string})=>(
+  <span style={{fontFamily:FONT,fontSize:3.5,color,border:`1px solid ${color}55`,
+    padding:"2px 6px",background:`${color}10`,whiteSpace:"nowrap",borderRadius:1}}>{children}</span>
+);
+const Btn=({children,onClick,color,disabled,full,size="md"}:{
+  children:React.ReactNode;onClick:()=>void;color:string;disabled?:boolean;full?:boolean;size?:"xs"|"sm"|"md"|"lg";
+})=>{
+  const pd={xs:"3px 8px",sm:"5px 12px",md:"8px 16px",lg:"12px 22px"}[size];
+  const fs={xs:3.5,sm:4,md:5,lg:6}[size];
+  return(
+    <button onClick={onClick} disabled={disabled} style={{
+      fontFamily:FONT,fontSize:fs,padding:pd,cursor:disabled?"not-allowed":"pointer",
+      background:disabled?C.dim:`${color}18`,border:`1px solid ${disabled?C.border:color}`,
+      color:disabled?C.muted:color,borderRadius:2,transition:"all 0.15s",
+      boxShadow:disabled?"none":`0 0 10px ${color}28`,width:full?"100%":undefined,opacity:disabled?0.4:1,
+    }}
+    onMouseEnter={e=>{if(!disabled)(e.currentTarget as HTMLElement).style.boxShadow=`0 0 20px ${color}55`;}}
+    onMouseLeave={e=>{if(!disabled)(e.currentTarget as HTMLElement).style.boxShadow=`0 0 10px ${color}28`;}}
+    >{children}</button>
+  );
+};
+
+/* ─── COMMAND PALETTE ─── */
+function CmdPalette({open,onClose,onGoal,onScreen}:{open:boolean;onClose:()=>void;onGoal:(g:string,p:Priority)=>void;onScreen:(s:string)=>void;}){
+  const [q,setQ]=useState("");const[sel,setSel]=useState(0);const ref=useRef<HTMLInputElement>(null);
+  const cmds=useMemo(()=>[
+    ...QUICK.map(([icon,label,goal,priority])=>({icon,label,color:C.gold,action:()=>onGoal(goal,priority as Priority)})),
+    {icon:"◈",label:"SNS管理",color:C.pink,action:()=>onScreen("sns")},
+    {icon:"⚙",label:"自動化スケジューラ",color:C.lime,action:()=>onScreen("scheduler")},
+    {icon:"👑",label:"AI部隊ステータス",color:C.gold,action:()=>onScreen("agents")},
+    {icon:"❤",label:"システムヘルス",color:C.red,action:()=>onScreen("health")},
+    {icon:"✓",label:"全件一括承認",color:C.green,action:()=>{document.dispatchEvent(new Event("approve-all"));onClose();}},
+  ],[onGoal,onScreen,onClose]);
+  const filtered=useMemo(()=>!q?cmds:cmds.filter(c=>c.label.toLowerCase().includes(q.toLowerCase())),[q,cmds]);
+  useEffect(()=>setSel(0),[filtered]);
+  useEffect(()=>{if(open){setQ("");setSel(0);setTimeout(()=>ref.current?.focus(),40);}},[open]);
+  if(!open)return null;
+  return(
+    <div style={{position:"fixed",inset:0,zIndex:9999,background:"rgba(2,5,9,0.9)",backdropFilter:"blur(6px)",
+      display:"flex",alignItems:"flex-start",justifyContent:"center",paddingTop:"12vh"}} onClick={onClose}>
+      <div style={{width:"min(620px,95vw)",background:C.card,border:`1px solid ${C.gold}44`,borderRadius:4,
+        overflow:"hidden",boxShadow:`0 0 80px ${C.gold}18,0 40px 100px rgba(0,0,0,0.9)`,animation:"slideDown 0.15s ease"}}
+        onClick={e=>e.stopPropagation()}>
+        <div style={{display:"flex",alignItems:"center",gap:10,padding:"13px 18px",borderBottom:`1px solid ${C.border}`}}>
+          <span style={{fontFamily:FONT,fontSize:10,color:C.gold}}>⌘</span>
+          <input ref={ref} value={q} onChange={e=>setQ(e.target.value)}
+            onKeyDown={e=>{
+              if(e.key==="ArrowDown"){e.preventDefault();setSel(s=>Math.min(s+1,filtered.length-1));}
+              if(e.key==="ArrowUp"){e.preventDefault();setSel(s=>Math.max(s-1,0));}
+              if(e.key==="Enter"&&filtered[sel]){filtered[sel].action();onClose();}
+              if(e.key==="Escape")onClose();
+            }}
+            placeholder="コマンド・ゴールを入力... (⌘K で開閉)"
+            style={{flex:1,background:"transparent",border:"none",color:C.text,fontFamily:SANS,fontSize:15,outline:"none"}}/>
+          <span style={{fontFamily:FONT,fontSize:4,color:C.muted,border:`1px solid ${C.border}`,padding:"2px 5px"}}>ESC</span>
+        </div>
+        <div style={{maxHeight:400,overflowY:"auto"}}>
+          {filtered.map((c,i)=>(
+            <div key={i} onClick={()=>{c.action();onClose();}}
+              style={{padding:"11px 18px",cursor:"pointer",display:"flex",alignItems:"center",gap:12,
+                background:sel===i?`${c.color}10`:"transparent",
+                borderLeft:sel===i?`2px solid ${c.color}`:"2px solid transparent",transition:"all 0.1s"}}
+              onMouseEnter={()=>setSel(i)}>
+              <span style={{fontSize:15,flexShrink:0}}>{c.icon}</span>
+              <span style={{fontFamily:SANS,fontSize:13,color:sel===i?C.text:C.muted,flex:1}}>{c.label}</span>
+              {sel===i&&<span style={{fontFamily:FONT,fontSize:4,color:c.color}}>↵ 実行</span>}
+            </div>
+          ))}
+        </div>
+        <div style={{padding:"6px 18px",borderTop:`1px solid ${C.border}`,fontFamily:FONT,fontSize:4,color:C.muted,display:"flex",gap:14}}>
+          <span>↑↓ 移動</span><span>↵ 実行</span><span>ESC 閉じる</span>
         </div>
       </div>
     </div>
   );
 }
 
-/* ============================================================
-   PIXEL STAR RATING
-============================================================ */
-const Stars = ({ count, max=5, color }) => (
-  <div style={{ display:"flex", gap:2 }}>
-    {Array.from({length:max}).map((_,i)=>(
-      <div key={i} style={{ width:8, height:8,
-        background:i<count?color:"#1e293b",
-        boxShadow:i<count?`0 0 4px ${color}`:undefined,
-        clipPath:"polygon(50% 0%,61% 35%,98% 35%,68% 57%,79% 91%,50% 70%,21% 91%,32% 57%,2% 35%,39% 35%)"
-      }}/>
-    ))}
-  </div>
-);
+/* ─── TASK CARD ─── */
+function TaskCard({task,tasks,onApprove,onReject,onToggle,expanded}:{
+  task:Task;tasks:Task[];onApprove:()=>void;onReject:()=>void;onToggle:()=>void;expanded:boolean;
+}){
+  const touchX=useRef(0);const[swipe,setSwipe]=useState(0);const[drag,setDrag]=useState(false);
+  const ag=AGENTS[task.agent];
+  const children=tasks.filter(t=>t.parent_id===task.id);
+  const isLive=["running","qa_running","qa_fixing"].includes(task.status);
+  const dotColor={pending:C.muted,running:ag.color,done:C.green,failed:C.red,auto_approved:C.green,qa_running:C.purple,qa_fixing:C.orange}[task.status];
+  const statusTxt={pending:"待機",running:"実行中",done:"完了",failed:"失敗",auto_approved:"✓ 自動完了",qa_running:"QA検証中",qa_fixing:"自動修正中"}[task.status];
+  const elapsed=task.started_at?((task.done_at||now())-task.started_at)/1000:0;
 
-/* ============================================================
-   QUEST CARD
-============================================================ */
-function QuestCard({ quest, onComplete }) {
-  const diffColor = { S:C.gold, A:"#f97316", B:C.blue, C:C.green }[quest.diff];
-  return (
-    <div style={{
-      padding:"10px 12px", marginBottom:8, borderRadius:2,
-      border:`1px solid ${quest.done?C.green+"44":diffColor+"55"}`,
-      background:quest.done?`${C.green}08`:`${diffColor}06`,
-      opacity:quest.done?0.7:1,
-      transition:"all 0.3s",
-    }}>
-      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:5 }}>
-        <div style={{ fontFamily:FONT, fontSize:5, color:diffColor, padding:"2px 5px",
-          border:`1px solid ${diffColor}`, flexShrink:0 }}>{quest.diff}</div>
-        <span style={{ fontFamily:FONT, fontSize:5, color:quest.done?C.green:C.text, flex:1,
-          textDecoration:quest.done?"line-through":"none" }}>{quest.title}</span>
-        <span style={{ fontFamily:FONT, fontSize:5, color:C.gold }}>+{quest.xp}XP</span>
-      </div>
-      <div style={{ fontFamily:MONO, fontSize:10, color:C.muted, marginBottom:quest.done?0:8,
-        lineHeight:1.7 }}>{quest.desc}</div>
-      {!quest.done && (
-        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
-          <div style={{ flex:1, marginRight:10 }}>
-            <div style={{ height:4, background:C.border, borderRadius:1 }}>
-              <div style={{ height:"100%", width:`${quest.progress}%`, background:diffColor,
-                boxShadow:`0 0 4px ${diffColor}`, borderRadius:1, transition:"width 0.6s" }}/>
+  const logTypeStyle:{[k:string]:{c:string;icon:string}}={
+    think:{c:C.purple,icon:"💭"},action:{c:C.blue,icon:"⚡"},result:{c:C.green,icon:"✓"},
+    error:{c:C.red,icon:"✗"},delegate:{c:C.gold,icon:"→"},search:{c:"#22d3ee",icon:"🔍"},
+    code:{c:C.blue,icon:"⌨"},post:{c:C.pink,icon:"◈"},email:{c:C.orange,icon:"✉"},
+    qa:{c:C.purple,icon:"🔬"},fix:{c:C.orange,icon:"🔧"},deploy:{c:C.green,icon:"🚀"},auto:{c:C.teal,icon:"⚙"},
+  };
+
+  return(
+    <div style={{position:"relative",marginBottom:8,overflow:"hidden"}}>
+      {swipe>30&&drag&&<div style={{position:"absolute",inset:0,width:swipe,background:`${C.green}15`,display:"flex",alignItems:"center",paddingLeft:14,zIndex:0}}><span style={{fontFamily:FONT,fontSize:5,color:C.green}}>✓ 承認</span></div>}
+      {swipe<-30&&drag&&<div style={{position:"absolute",inset:0,left:"auto",width:-swipe,background:`${C.red}15`,display:"flex",alignItems:"center",justifyContent:"flex-end",paddingRight:14,zIndex:0}}><span style={{fontFamily:FONT,fontSize:5,color:C.red}}>✗ 却下</span></div>}
+      <div
+        onTouchStart={e=>{touchX.current=e.touches[0].clientX;setDrag(true);}}
+        onTouchMove={e=>setSwipe(Math.max(-130,Math.min(130,e.touches[0].clientX-touchX.current)))}
+        onTouchEnd={()=>{if(swipe>80)onApprove();else if(swipe<-80)onReject();setSwipe(0);setDrag(false);}}
+        style={{background:C.card,borderRadius:3,overflow:"hidden",position:"relative",zIndex:1,
+          border:`1px solid ${isLive?ag.color+"77":dotColor+"33"}`,
+          boxShadow:isLive?`0 0 22px ${ag.color}18`:"none",
+          transform:`translateX(${swipe}px)`,transition:drag?"none":"transform 0.2s"}}>
+        <div style={{height:2,background:`linear-gradient(90deg,${ag.color},${ag.color}33)`,boxShadow:`0 0 6px ${ag.color}`}}/>
+        {isLive&&<div style={{position:"absolute",top:2,left:0,right:0,height:1,background:`linear-gradient(90deg,transparent,${ag.color},transparent)`,animation:"scanH 2s linear infinite"}}/>}
+        <div onClick={onToggle} style={{padding:"11px 14px",cursor:"pointer",display:"flex",alignItems:"center",gap:10}}>
+          <Glow color={dotColor} size={isLive?10:7} pulse={isLive}/>
+          <div style={{flex:1,minWidth:0}}>
+            <div style={{fontFamily:SANS,fontSize:13,fontWeight:600,color:C.text,marginBottom:4,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{task.title}</div>
+            <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+              <Tag color={ag.color}>{ag.icon} {ag.name}</Tag>
+              <Tag color={dotColor}>{statusTxt}</Tag>
+              {task.auto_approved&&task.status!=="auto_approved"&&<Tag color={C.teal}>⚡ 自動</Tag>}
+              {task.qa_passed&&<Tag color={C.purple}>🔬 QA合格</Tag>}
+              {task.qa_cycles>0&&<Tag color={C.purple}>{task.qa_cycles}回修正</Tag>}
+              {elapsed>1&&<span style={{fontFamily:MONO,fontSize:9,color:C.muted}}>{elapsed.toFixed(1)}s</span>}
+              {(task.status==="done"||task.status==="auto_approved")&&task.xp>0&&<span style={{fontFamily:FONT,fontSize:4,color:C.gold}}>+{task.xp}XP</span>}
+              {task.tags.map(t=><span key={t} style={{fontFamily:MONO,fontSize:9,color:C.muted,background:C.dim,padding:"1px 5px",borderRadius:1}}>{t}</span>)}
             </div>
-            <div style={{ fontFamily:MONO, fontSize:9, color:C.muted, marginTop:2 }}>{quest.progress}%</div>
           </div>
-          {quest.progress>=100 && (
-            <button onClick={()=>onComplete(quest.id)} style={{
-              fontFamily:FONT, fontSize:4, padding:"4px 10px",
-              background:`${C.gold}22`, border:`1px solid ${C.gold}`,
-              color:C.gold, cursor:"pointer", borderRadius:1,
-              boxShadow:`0 0 8px ${C.gold}44`,
-              animation:"pulse 1s infinite",
-            }}>✓ 完了！</button>
-          )}
+          <div style={{display:"flex",gap:5,flexShrink:0}}>
+            {children.length>0&&<span style={{fontFamily:MONO,fontSize:9,color:C.muted}}>{children.length}↓</span>}
+            <span style={{fontFamily:FONT,fontSize:7,color:C.muted}}>{expanded?"▲":"▼"}</span>
+          </div>
+        </div>
+        {expanded&&(
+          <div style={{borderTop:`1px solid ${C.border}`}}>
+            <div style={{maxHeight:180,overflowY:"auto",padding:"10px 14px",background:"#010306",fontFamily:MONO,fontSize:10.5}}>
+              {task.logs.length===0&&<span style={{color:C.muted}}>待機中...</span>}
+              {task.logs.map((l,i)=>{
+                const s=logTypeStyle[l.type]||{c:C.muted,icon:"·"};
+                return(<div key={i} style={{display:"flex",gap:8,marginBottom:4,animation:"fadeIn 0.2s"}}>
+                  <span style={{color:C.muted,flexShrink:0,fontSize:9}}>{ft(l.ts)}</span>
+                  <span style={{color:s.c,flexShrink:0}}>{s.icon}</span>
+                  <span style={{color:s.c===C.green?C.text:s.c,lineHeight:1.7}}>{l.text}</span>
+                </div>);
+              })}
+              {isLive&&<div style={{display:"flex",gap:4,marginTop:6}}>{[0,1,2].map(i=><div key={i} style={{width:5,height:5,borderRadius:"50%",background:ag.color,animation:"blink 1s infinite",animationDelay:`${i*0.2}s`}}/>)}</div>}
+            </div>
+            {task.output&&(
+              <div style={{padding:"12px 14px",borderTop:`1px solid ${C.border}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:7}}>
+                  <span style={{fontFamily:FONT,fontSize:5,color:ag.color}}>{ag.icon} 成果物</span>
+                  <Btn onClick={()=>navigator.clipboard.writeText(task.output)} color={C.blue} size="xs">📋 コピー</Btn>
+                </div>
+                <pre style={{fontFamily:MONO,fontSize:10.5,color:C.text,background:C.surface,padding:"12px 14px",
+                  border:`1px solid ${ag.color}15`,borderRadius:2,whiteSpace:"pre-wrap",overflow:"auto",maxHeight:280,lineHeight:1.8,margin:0}}>
+                  {task.output}
+                </pre>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      {expanded&&children.length>0&&(
+        <div style={{marginLeft:16,paddingLeft:12,borderLeft:`1px solid ${C.glow}`}}>
+          {children.map(child=>(
+            <TaskCard key={child.id} task={child} tasks={tasks}
+              onApprove={()=>{}} onReject={()=>{}} expanded={false} onToggle={()=>{}}/>
+          ))}
         </div>
       )}
     </div>
   );
 }
 
-/* ============================================================
-   LEVEL UP OVERLAY
-============================================================ */
-function LevelUpOverlay({ dept, level, onClose }) {
-  return (
-    <div style={{
-      position:"fixed", inset:0, zIndex:1000,
-      background:"rgba(0,0,0,0.85)",
-      display:"flex", alignItems:"center", justifyContent:"center",
-      animation:"fadeIn 0.3s ease",
-    }} onClick={onClose}>
-      <div style={{
-        textAlign:"center", padding:40,
-        border:`2px solid ${C.gold}`,
-        background:"#020508",
-        boxShadow:`0 0 60px ${C.gold}44, inset 0 0 40px ${C.goldDim}22`,
-        position:"relative",
-      }}>
-        {Array.from({length:12}).map((_,i)=>(
-          <div key={i} style={{
-            position:"absolute",
-            left:`${10+Math.random()*80}%`, top:`${10+Math.random()*80}%`,
-            width:4, height:4, background:C.gold,
-            animation:`sparkle ${0.5+Math.random()}s ease-out infinite`,
-            animationDelay:`${Math.random()*0.5}s`,
-          }}/>
-        ))}
-        <div style={{ fontFamily:FONT, fontSize:8, color:C.gold, marginBottom:12,
-          textShadow:`0 0 20px ${C.gold}`, letterSpacing:"0.2em" }}>
-          LEVEL UP!
+/* ─── HEALTH DASHBOARD ─── */
+function HealthPanel({tasks,posts,schedules}:{tasks:Task[];posts:SNSPost[];schedules:Schedule[]}){
+  const done=tasks.filter(t=>t.status==="done"||t.status==="auto_approved").length;
+  const auto=tasks.filter(t=>t.auto_approved).length;
+  const qaFixed=tasks.reduce((s,t)=>s+t.qa_cycles,0);
+  const xp=tasks.reduce((s,t)=>s+t.xp,0);
+  const saved=Math.floor(done*0.5);
+  const bots=schedules.filter(s=>s.enabled).length;
+  return(
+    <div style={{display:"grid",gridTemplateColumns:"repeat(6,1fr)",gap:8,marginBottom:14}}>
+      {[{l:"完了",v:done,c:C.green,i:"✓"},{l:"自動承認",v:auto,c:C.teal,i:"⚡"},
+        {l:"QA修正",v:qaFixed,c:C.purple,i:"🔬"},{l:"獲得XP",v:xp,c:C.gold,i:"⭐"},
+        {l:"削減時間",v:`${saved}h`,c:C.blue,i:"⏱"},{l:"自動Bot",v:bots,c:C.lime,i:"⚙"}].map(m=>(
+        <div key={m.l} style={{padding:"11px 8px",background:C.card,border:`1px solid ${m.c}33`,borderRadius:3,textAlign:"center"}}>
+          <div style={{fontSize:12,marginBottom:3}}>{m.i}</div>
+          <div style={{fontFamily:FONT,fontSize:11,color:m.c,marginBottom:3}}>{m.v}</div>
+          <div style={{fontFamily:MONO,fontSize:8.5,color:C.muted}}>{m.l}</div>
         </div>
-        <div style={{ fontFamily:FONT, fontSize:24, color:"#fff", marginBottom:8,
-          textShadow:`0 0 30px ${C.gold}` }}>Lv.{level}</div>
-        <div style={{ fontFamily:MONO, fontSize:14, color:C.gold, marginBottom:20 }}>
-          {dept} がレベルアップしました！
-        </div>
-        <div style={{ fontFamily:FONT, fontSize:5, color:C.muted }}>
-          タップして続ける
-        </div>
-      </div>
+      ))}
     </div>
   );
 }
 
-/* ============================================================
-   AI ADVISOR CHARACTER
-============================================================ */
-function AIAdvisor({ advice, loading, onAsk }) {
-  const [frame, setFrame] = useState(0);
-  useEffect(()=>{
-    const i=setInterval(()=>setFrame(f=>(f+1)%4),400);
-    return()=>clearInterval(i);
-  },[]);
-  const bob=[0,-2,0,2][frame];
-
-  return (
-    <div style={{
-      background:"#030a10", border:`1px solid ${C.gold}44`,
-      borderRadius:3, overflow:"hidden",
-      boxShadow:`0 0 20px ${C.gold}11`,
-    }}>
-      <div style={{ padding:"8px 12px", background:`${C.gold}11`,
-        borderBottom:`1px solid ${C.gold}33`,
-        display:"flex", alignItems:"center", gap:10 }}>
-        <svg width={28} height={40} style={{ flexShrink:0 }}>
-          <g transform={`translate(14,${20+bob})`}>
-            <ellipse cx={0} cy={16} rx={6} ry={1.5} fill="rgba(0,0,0,0.4)"/>
-            <rect x={-4} y={-2} width={8} height={10} fill={C.purple} rx={1}/>
-            <rect x={-6} y={-1} width={3} height={7} fill={C.purple} rx={1}/>
-            <rect x={3} y={-1} width={3} height={7} fill={C.purple} rx={1}/>
-            <rect x={-3} y={8} width={3} height={8} fill="#1e293b" rx={1}/>
-            <rect x={0} y={8} width={3} height={8} fill="#1e293b" rx={1}/>
-            <rect x={-4} y={-11} width={8} height={9} fill="#FDDCB5" rx={1}/>
-            <rect x={-2} y={-8} width={2} height={2} fill="#1a1a2e"/>
-            <rect x={1} y={-8} width={2} height={2} fill="#1a1a2e"/>
-            <polygon points="0,-20 -5,-12 5,-12" fill={C.purple}/>
-            <rect x={-6} y={-13} width={12} height={2} fill={C.purple}/>
-            <rect x={-1} y={-22} width={2} height={3} fill={C.gold}/>
-            <rect x={-1.5} y={-23} width={3} height={3} fill={C.gold} rx={0.5}/>
-            <rect x={2} y={-18} width={2} height={2} fill={C.gold} opacity={0.8}/>
-          </g>
-        </svg>
-        <div>
-          <div style={{ fontFamily:FONT, fontSize:5.5, color:C.gold }}>AIアドバイザー</div>
-          <div style={{ fontFamily:MONO, fontSize:10, color:C.muted, marginTop:2 }}>
-            戦略魔法使い · Lv.99
-          </div>
-        </div>
-        <div style={{ marginLeft:"auto" }}>
-          <div style={{ width:8, height:8, borderRadius:"50%", background:C.green,
-            boxShadow:`0 0 6px ${C.green}`, animation:"pulse 2s infinite" }}/>
-        </div>
-      </div>
-
-      <div style={{ padding:"12px 14px", minHeight:80, position:"relative" }}>
-        {loading ? (
-          <div style={{ display:"flex", gap:6, alignItems:"center" }}>
-            {[0,1,2].map(i=>(
-              <div key={i} style={{ width:6, height:6, borderRadius:"50%",
-                background:C.gold, animation:"pulse 1s infinite",
-                animationDelay:`${i*0.2}s` }}/>
-            ))}
-            <span style={{ fontFamily:MONO, fontSize:10, color:C.muted }}>分析中...</span>
-          </div>
-        ) : advice ? (
-          <div style={{ fontFamily:MONO, fontSize:11, color:C.text, lineHeight:1.9,
-            whiteSpace:"pre-wrap" }}>{advice}</div>
-        ) : (
-          <div style={{ fontFamily:MONO, fontSize:11, color:C.muted, lineHeight:1.8 }}>
-            「現在の状況を分析して<br/>最適な戦略を提案します」
-          </div>
-        )}
-      </div>
-
-      <div style={{ padding:"8px 12px", borderTop:`1px solid ${C.border}`,
-        display:"flex", gap:8, flexWrap:"wrap" }}>
-        {["今日の戦略を聞く","売上を上げるには","コスト削減のヒント","次の一手は？"].map(q=>(
-          <button key={q} onClick={()=>onAsk(q)} disabled={loading} style={{
-            fontFamily:FONT, fontSize:4, padding:"4px 8px",
-            background:loading?"transparent":`${C.purple}22`,
-            border:`1px solid ${loading?C.border:C.purple+"66"}`,
-            color:loading?C.muted:C.purple, cursor:loading?"not-allowed":"pointer",
-            borderRadius:1, transition:"all 0.2s",
-          }}>{q}</button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================
-   DEPT RPG CARD
-============================================================ */
-function DeptRPGCard({ dept, onClick }) {
-  const [hovered, setHovered] = useState(false);
-  const levelColor = dept.level>=10?C.gold:dept.level>=7?"#f97316":dept.level>=4?C.blue:C.green;
-
-  return (
-    <div
-      onClick={onClick}
-      onMouseEnter={()=>setHovered(true)}
-      onMouseLeave={()=>setHovered(false)}
-      style={{
-        background:C.panel, borderRadius:3, overflow:"hidden",
-        border:`1px solid ${hovered?dept.color:dept.color+"44"}`,
-        boxShadow:hovered?`0 0 20px ${dept.color}33`:"none",
-        cursor:"pointer", transition:"all 0.15s",
-        transform:hovered?"translateY(-2px)":"none",
-      }}
-    >
-      <div style={{ height:3, background:dept.color,
-        boxShadow:`0 0 8px ${dept.color}` }}/>
-      <div style={{ padding:"12px 14px" }}>
-        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
-          <span style={{ fontSize:18 }}>{dept.icon}</span>
-          <div style={{ flex:1 }}>
-            <div style={{ fontFamily:FONT, fontSize:5.5, color:dept.color }}>{dept.name}</div>
-            <div style={{ display:"flex", alignItems:"center", gap:6, marginTop:3 }}>
-              <div style={{ fontFamily:FONT, fontSize:4, color:levelColor,
-                padding:"1px 5px", border:`1px solid ${levelColor}`,
-                background:`${levelColor}18` }}>Lv.{dept.level}</div>
-              <Stars count={Math.min(Math.ceil(dept.level/2),5)} color={dept.color}/>
-            </div>
-          </div>
-          {dept.status && (
-            <div style={{ fontFamily:FONT, fontSize:4, color:dept.statusColor||C.green,
-              padding:"2px 6px", border:`1px solid ${dept.statusColor||C.green}44`,
-              background:`${dept.statusColor||C.green}11`,
-              animation:dept.statusAnim?"pulse 2s infinite":"none" }}>
-              {dept.status}
-            </div>
-          )}
-        </div>
-        <StatBar label="HP" value={dept.hp} max={dept.maxHp} color={C.hp} icon="♥" showVal={false}/>
-        <StatBar label="パフォーマンス" value={dept.perf} max={100} color={dept.color} icon="⚡" showVal={false}/>
-        <div style={{ marginBottom:8 }}>
-          <div style={{ display:"flex", justifyContent:"space-between", marginBottom:2 }}>
-            <span style={{ fontFamily:FONT, fontSize:4, color:C.muted }}>📈 EXP</span>
-            <span style={{ fontFamily:FONT, fontSize:4, color:C.xp }}>{dept.xp}/{dept.xpNext}</span>
-          </div>
-          <div style={{ height:5, background:"#0a1520", borderRadius:1, overflow:"hidden" }}>
-            <div style={{
-              height:"100%", width:`${dept.xp/dept.xpNext*100}%`,
-              background:`linear-gradient(90deg,${C.xp}88,${C.xp})`,
-              boxShadow:`0 0 6px ${C.xp}`,
-              transition:"width 0.8s ease",
-            }}/>
-          </div>
-        </div>
-        <div style={{ display:"flex", justifyContent:"space-between",
-          padding:"6px 8px", background:C.bg, borderRadius:2,
-          border:`1px solid ${C.border}` }}>
-          <div style={{ textAlign:"center" }}>
-            <div style={{ fontFamily:FONT, fontSize:7, color:dept.todayColor||C.green }}>
-              {dept.todayValue}
-            </div>
-            <div style={{ fontFamily:MONO, fontSize:9, color:C.muted }}>{dept.todayLabel}</div>
-          </div>
-          <div style={{ width:1, background:C.border }}/>
-          <div style={{ textAlign:"center" }}>
-            <div style={{ fontFamily:FONT, fontSize:7,
-              color:dept.trend>=0?C.green:C.red }}>
-              {dept.trend>=0?"↑":"↓"}{Math.abs(dept.trend)}%
-            </div>
-            <div style={{ fontFamily:MONO, fontSize:9, color:C.muted }}>前日比</div>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================
-   TODAY'S SCORE PANEL
-============================================================ */
-function TodayScore({ revenue, cost, profit, target, stats }) {
-  const pct = Math.min(profit/target*100, 100);
-  const [clock, setClock] = useState(() => new Date());
-  useEffect(() => { setClock(new Date()); }, []);
-  const hour = clock.getHours();
-  const progress = Math.round((hour/24)*100);
-
-  return (
-    <div style={{
-      background:"#030a10", border:`2px solid ${C.gold}44`,
-      borderRadius:3, padding:"16px 20px",
-      boxShadow:`0 0 30px ${C.gold}11`,
-      position:"relative", overflow:"hidden",
-    }}>
-      <div style={{ position:"absolute", right:-20, top:-20, width:120, height:120,
-        borderRadius:"50%", background:`${C.gold}06`,
-        border:`40px solid ${C.gold}04` }}/>
-      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:14 }}>
-        <div style={{ width:6, height:6, background:C.gold,
-          boxShadow:`0 0 8px ${C.gold}`, animation:"pulse 2s infinite" }}/>
-        <span style={{ fontFamily:FONT, fontSize:5.5, color:C.gold, letterSpacing:"0.15em" }}>
-          TODAY&apos;S SCORE
-        </span>
-        <span style={{ fontFamily:MONO, fontSize:10, color:C.muted, marginLeft:"auto" }} suppressHydrationWarning>
-          {clock.toLocaleDateString("ja-JP",{month:"long",day:"numeric"})}
-        </span>
-      </div>
-      <div style={{ textAlign:"center", marginBottom:16, padding:"10px 0" }}>
-        <div style={{ fontFamily:MONO, fontSize:11, color:C.muted, marginBottom:4 }}>本日の純利益</div>
-        <Counter target={profit} prefix="¥" color={profit>=0?C.green:C.red} size={22}/>
-        <div style={{ fontFamily:MONO, fontSize:10, color:C.muted, marginTop:4 }}>
-          目標 ¥{target.toLocaleString()} まで
-          <span style={{ color:C.gold }}> ¥{Math.max(target-profit,0).toLocaleString()}</span>
-        </div>
-      </div>
-      <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:14 }}>
-        <div style={{ padding:"10px", background:`${C.green}08`,
-          border:`1px solid ${C.green}33`, borderRadius:2, textAlign:"center" }}>
-          <div style={{ fontFamily:MONO, fontSize:10, color:C.muted, marginBottom:4 }}>売上</div>
-          <Counter target={revenue} prefix="¥" color={C.green} size={12}/>
-        </div>
-        <div style={{ padding:"10px", background:`${C.red}08`,
-          border:`1px solid ${C.red}33`, borderRadius:2, textAlign:"center" }}>
-          <div style={{ fontFamily:MONO, fontSize:10, color:C.muted, marginBottom:4 }}>コスト</div>
-          <Counter target={cost} prefix="¥" color={C.red} size={12}/>
-        </div>
-      </div>
-      <div style={{ marginBottom:10 }}>
-        <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
-          <span style={{ fontFamily:FONT, fontSize:4.5, color:C.muted }}>🎯 月次目標進捗</span>
-          <span style={{ fontFamily:FONT, fontSize:4.5, color:C.gold }}>{Math.round(pct)}%</span>
-        </div>
-        <div style={{ height:10, background:"#0a1520", borderRadius:1,
-          border:`1px solid ${C.gold}33`, overflow:"hidden", position:"relative" }}>
-          <div style={{
-            height:"100%", width:`${pct}%`,
-            background:`linear-gradient(90deg,${C.goldDim},${C.gold})`,
-            boxShadow:`0 0 10px ${C.gold}66`,
-            transition:"width 1s ease", position:"relative",
-          }}>
-            <div style={{ position:"absolute", top:0, left:0, right:0, height:"40%",
-              background:"rgba(255,255,255,0.2)" }}/>
-          </div>
-          <div style={{ position:"absolute", top:0, bottom:0,
-            left:`${progress}%`, width:1, background:"rgba(255,255,255,0.4)" }}/>
-        </div>
-        <div style={{ fontFamily:MONO, fontSize:9, color:C.muted, marginTop:3 }}>
-          本日 {progress}% 経過 · ペース {pct>progress?"✦ 順調":"⚠ 要改善"}
-        </div>
-      </div>
-      <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:6 }} suppressHydrationWarning>
-        {[
-          {label:"ユーザー",value:stats?`${stats.users.total}人`:"—",color:C.blue},
-          {label:"動画生成",value:stats?`${stats.usage.videoJobs}本`:"—",color:C.purple},
-          {label:"購入数",value:stats?`${stats.revenue.purchases}件`:"—",color:C.green},
-        ].map(s=>(
-          <div key={s.label} style={{ textAlign:"center", padding:"5px",
-            background:C.bg, borderRadius:1 }} suppressHydrationWarning>
-            <div style={{ fontFamily:FONT, fontSize:7, color:s.color }} suppressHydrationWarning>{s.value}</div>
-            <div style={{ fontFamily:MONO, fontSize:8, color:C.muted }}>{s.label}</div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================
-   ACHIEVEMENT TOAST
-============================================================ */
-function AchievementToast({ achievement, onClose }) {
-  useEffect(()=>{
-    const t=setTimeout(onClose,4000);
-    return()=>clearTimeout(t);
-  },[onClose]);
-  return (
-    <div style={{
-      position:"fixed", bottom:20, right:20, zIndex:999,
-      padding:"12px 16px", background:"#030a10",
-      border:`2px solid ${C.gold}`,
-      boxShadow:`0 0 30px ${C.gold}55`,
-      animation:"slideUp 0.3s ease",
-      maxWidth:280,
-    }}>
-      <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-        <span style={{ fontSize:24 }}>{achievement.icon}</span>
-        <div>
-          <div style={{ fontFamily:FONT, fontSize:4.5, color:C.gold, marginBottom:3 }}>実績解除！</div>
-          <div style={{ fontFamily:FONT, fontSize:5, color:C.text }}>{achievement.name}</div>
-          <div style={{ fontFamily:MONO, fontSize:10, color:C.muted, marginTop:2 }}>{achievement.desc}</div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================
-   PIXEL CHARACTER ENGINE
-============================================================ */
-function PixelChar({ type = "suit_blue", scale = 1.4, frame = 0, facing = 1 }: {
-  type?: string; scale?: number; frame?: number; facing?: number;
-}) {
-  const s = scale;
-  const bob = [0, -1, 0, 1][frame % 4];
-  const legL = frame % 2 === 0 ? 4 : -4;
-  const legR = frame % 2 === 0 ? -4 : 4;
-  const armSwing = frame % 2 === 0 ? 6 : -6;
-
-  const CHARS: Record<string, any> = {
-    suit_navy_red: {
-      skin:"#E8B88A", hair:"#5C3A1E", hairStyle:"short",
-      suit:"#1a2a5e", shirt:"#fff", tie:"#cc2200",
-      pants:"#1a2a5e", shoes:"#3D1F00",
-      item:"briefcase", itemColor:"#8B5E3C",
-      glasses:false,
-    },
-    suit_navy_female: {
-      skin:"#E8B88A", hair:"#6B3A2A", hairStyle:"bob",
-      suit:"#1a2a5e", shirt:"#fff", tie:null,
-      pants:"#1a2a5e", shoes:"#3D1F00",
-      item:"briefcase", itemColor:"#8B5E3C",
-      glasses:false, female:true,
-    },
-    shirt_white_glasses: {
-      skin:"#E8B88A", hair:"#1a1a1a", hairStyle:"short",
-      suit:"#fff", shirt:"#fff", tie:"#cc2200",
-      pants:"#1a2a5e", shoes:"#2a2a2a",
-      item:"briefcase", itemColor:"#8B5E3C",
-      glasses:true,
-    },
-    suit_gray_blue: {
-      skin:"#E8B88A", hair:"#2a2a2a", hairStyle:"short",
-      suit:"#5a5a6e", shirt:"#fff", tie:"#2255cc",
-      pants:"#5a5a6e", shoes:"#2a2a2a",
-      item:"briefcase", itemColor:"#8B5E3C",
-      glasses:false,
-    },
-    suit_gray_senior: {
-      skin:"#DFAA80", hair:"#c8c8c8", hairStyle:"short",
-      suit:"#5a5a6e", shirt:"#fff", tie:"#2255cc",
-      pants:"#5a5a6e", shoes:"#2a2a2a",
-      item:"briefcase", itemColor:"#8B5E3C",
-      glasses:false, senior:true,
-    },
-    suit_pink_female: {
-      skin:"#E8B88A", hair:"#c8a030", hairStyle:"bun",
-      suit:"#cc4466", shirt:"#fff", tie:null,
-      pants:"#cc4466", shoes:"#3D1F00",
-      item:"briefcase", itemColor:"#8B5E3C",
-      glasses:false, female:true,
-    },
-    shirt_casual_glasses: {
-      skin:"#E8B88A", hair:"#3a2a1a", hairStyle:"messy",
-      suit:"#fff", shirt:"#fff", tie:"#2255cc",
-      pants:"#1a2a5e", shoes:"#2a2a2a",
-      item:"briefcase", itemColor:"#8B5E3C",
-      glasses:true,
-    },
-    suit_lightblue_female: {
-      skin:"#E8B88A", hair:"#aa2200", hairStyle:"ponytail",
-      suit:"#5588cc", shirt:"#fff", tie:null,
-      pants:"#5588cc", shoes:"#3D1F00",
-      item:"clipboard", itemColor:"#DEB887",
-      glasses:false, female:true,
-    },
-    suit_brown_orange: {
-      skin:"#E8B88A", hair:"#3a2a1a", hairStyle:"short",
-      suit:"#6B4423", shirt:"#fff", tie:"#e07020",
-      pants:"#6B4423", shoes:"#3D1F00",
-      item:"briefcase", itemColor:"#5a3a1a",
-      glasses:false,
-    },
-    suit_green_cap: {
-      skin:"#E8B88A", hair:"#2a2a2a", hairStyle:"cap_blue",
-      suit:"#1a6b3a", shirt:"#fff", tie:"#cc2200",
-      pants:"#1a6b3a", shoes:"#2a2a2a",
-      item:"folder", itemColor:"#8B5E3C",
-      glasses:false,
-    },
-    work_green_mask: {
-      skin:"#E8B88A", hair:"#2a3a2a", hairStyle:"cap_green",
-      suit:"#2a6b3a", shirt:"#2a6b3a", tie:null,
-      pants:"#2a6b3a", shoes:"#2a2a2a",
-      item:"clipboard", itemColor:"#DEB887",
-      glasses:false, mask:true,
-    },
-    work_khaki_mask_female: {
-      skin:"#E8B88A", hair:"#1a1a1a", hairStyle:"short",
-      suit:"#7a7a4a", shirt:"#7a7a4a", tie:null,
-      pants:"#7a7a4a", shoes:"#3D1F00",
-      item:"folder", itemColor:"#5a3a1a",
-      glasses:false, mask:true, female:true,
-    },
+/* ─── SNS COMPOSER ─── */
+function SNSComposer({onSave}:{onSave:(p:SNSPost)=>void}){
+  const[plat,setPlat]=useState<Platform>("threads");
+  const[content,setContent]=useState("");const[schedAt,setSchedAt]=useState("");
+  const[gen,setGen]=useState(false);const[topic,setTopic]=useState("");const[score,setScore]=useState<number|null>(null);
+  const p=PLATFORMS.find(x=>x.id===plat)!;const over=content.length>p.limit;
+  const generate=async()=>{
+    if(!topic.trim()||gen)return;
+    setGen(true);setContent("");setScore(null);
+    let out="";
+    await stream(AGENTS.pr.sys,[{role:"user",content:`${plat}向け投稿文:\nトピック:${topic}\n上限:${p.limit}字\n完成形のみ出力。ハッシュタグ含む。`}],c=>{out+=c;setContent(out);},600);
+    const s=parseInt(await ask("SNS投稿のバズ予測スコア(0-100)を数字のみで返してください。",`プラットフォーム:${plat}\n投稿:${out.slice(0,200)}`));
+    if(!isNaN(s))setScore(s);
+    setGen(false);
   };
-
-  const ch = CHARS[type] || CHARS.suit_navy_red;
-
-  return (
-    <g transform={`scale(${facing},1) translate(${facing < 0 ? -Math.round(14*s) : 0},0)`}>
-      <g transform={`translate(0,${bob})`}>
-        <ellipse cx={7*s} cy={42*s} rx={7*s} ry={1.5*s} fill="rgba(0,0,0,0.35)"/>
-        <rect x={3*s} y={28*s} width={4*s} height={10*s} fill={ch.pants} rx={s*0.5}
-          transform={`rotate(${legL},5,28)`}/>
-        <rect x={8*s} y={28*s} width={4*s} height={10*s} fill={ch.pants} rx={s*0.5}
-          transform={`rotate(${legR},10,28)`}/>
-        <rect x={2*s} y={36*s} width={5*s} height={3*s} fill={ch.shoes} rx={s*0.5}
-          transform={`rotate(${legL},5,28)`}/>
-        <rect x={7.5*s} y={36*s} width={5*s} height={3*s} fill={ch.shoes} rx={s*0.5}
-          transform={`rotate(${legR},10,28)`}/>
-        <rect x={2*s} y={16*s} width={11*s} height={14*s} fill={ch.suit} rx={s}/>
-        <rect x={5*s} y={16*s} width={5*s} height={8*s} fill={ch.shirt}/>
-        {ch.tie && (
-          <>
-            <rect x={6.5*s} y={17*s} width={2*s} height={6*s} fill={ch.tie} rx={s*0.3}/>
-            <polygon points={`${6.5*s},${23*s} ${8.5*s},${23*s} ${7.5*s},${26*s}`} fill={ch.tie}/>
-          </>
+  const save=()=>{
+    if(!content.trim()||over)return;
+    const tags=content.match(/#[\w\u3040-\u9fff]+/g)||[];
+    onSave({id:uid(),platform:plat,content,hashtags:tags,status:schedAt?"scheduled":"draft",scheduled_at:schedAt?new Date(schedAt).getTime():undefined,ai_score:score||0,likes:0,views:0});
+    setContent("");setSchedAt("");setScore(null);
+  };
+  const sc=score?score>=80?C.green:score>=60?C.gold:score>=40?C.orange:C.red:C.muted;
+  return(
+    <div style={{display:"grid",gridTemplateColumns:"1fr 290px",gap:14,padding:14,overflow:"auto",flex:1}}>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        <div style={{display:"flex",gap:5}}>
+          {PLATFORMS.map(pl=>(
+            <button key={pl.id} onClick={()=>setPlat(pl.id)} style={{flex:1,padding:"7px 4px",cursor:"pointer",borderRadius:2,fontFamily:FONT,fontSize:3.5,
+              background:plat===pl.id?`${pl.color}18`:"transparent",border:`1px solid ${plat===pl.id?pl.color:C.border}`,
+              color:plat===pl.id?pl.color:C.muted,boxShadow:plat===pl.id?`0 0 10px ${pl.color}33`:"none"}}>
+              <div style={{fontSize:12,marginBottom:2}}>{pl.icon}</div>
+              <div style={{textTransform:"uppercase"}}>{pl.id}</div>
+            </button>
+          ))}
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <input value={topic} onChange={e=>setTopic(e.target.value)} onKeyDown={e=>e.key==="Enter"&&generate()}
+            placeholder="トピック → Enter でAI生成"
+            style={{flex:1,background:C.card,border:`1px solid ${C.border}`,color:C.text,fontFamily:SANS,fontSize:13,padding:"9px 12px",borderRadius:2}}/>
+          <Btn onClick={generate} disabled={gen||!topic.trim()} color={C.purple}>{gen?"⟳ 生成中":"✦ AI生成"}</Btn>
+        </div>
+        <textarea value={content} onChange={e=>setContent(e.target.value)}
+          placeholder={`${p.name}用の投稿文...（上限${p.limit}字）`}
+          style={{flex:1,minHeight:180,background:C.card,border:`1px solid ${over?C.red:content?p.color+"55":C.border}`,
+            color:C.text,fontFamily:MONO,fontSize:12,padding:"12px 14px",borderRadius:2,resize:"none",lineHeight:1.8,outline:"none"}}/>
+        <div style={{display:"flex",justifyContent:"space-between"}}>
+          <span style={{fontFamily:MONO,fontSize:10,color:over?C.red:C.muted}}>{content.length}/{p.limit}字</span>
+          {score!==null&&<span style={{fontFamily:FONT,fontSize:5,color:sc}}>🎯 バズ予測: {score}</span>}
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <input type="datetime-local" value={schedAt} onChange={e=>setSchedAt(e.target.value)}
+            style={{flex:1,background:C.card,border:`1px solid ${C.border}`,color:C.text,fontFamily:MONO,fontSize:11,padding:"8px 10px",borderRadius:2}}/>
+          <Btn onClick={save} disabled={!content.trim()||over} color={p.color}>{schedAt?"⏰ 予約":"💾 保存"}</Btn>
+        </div>
+      </div>
+      <div style={{display:"flex",flexDirection:"column",gap:10}}>
+        {score!==null&&(
+          <div style={{padding:14,background:C.card,border:`1px solid ${sc}44`,borderRadius:3}}>
+            <div style={{fontFamily:FONT,fontSize:5,color:C.muted,marginBottom:8}}>✦ バズ予測</div>
+            <div style={{fontFamily:FONT,fontSize:28,color:sc,textShadow:`0 0 18px ${sc}`,marginBottom:6}}>{score}</div>
+            <div style={{height:5,background:C.dim,borderRadius:3,marginBottom:6}}>
+              <div style={{height:"100%",width:`${score}%`,background:sc,borderRadius:3,transition:"width 1s"}}/>
+            </div>
+            <div style={{fontFamily:SANS,fontSize:11,color:C.muted}}>{score>=80?"🔥 バズる可能性 高":score>=60?"📈 良好":score>=40?"📊 普通":"⚠ 改善推奨"}</div>
+          </div>
         )}
-        <polygon points={`${2*s},${16*s} ${6*s},${16*s} ${5*s},${21*s} ${2*s},${18*s}`} fill={ch.suit}/>
-        <polygon points={`${13*s},${16*s} ${9*s},${16*s} ${10*s},${21*s} ${13*s},${18*s}`} fill={ch.suit}/>
-        {ch.female && (
-          <rect x={2*s} y={28*s} width={11*s} height={5*s} fill={ch.suit} rx={s*0.5}/>
-        )}
-        <rect x={-1*s} y={17*s} width={3.5*s} height={10*s} fill={ch.suit} rx={s*0.5}
-          transform={`rotate(${-armSwing*0.4},1,17)`}/>
-        <rect x={-0.5*s} y={26*s} width={2.5*s} height={2.5*s} fill={ch.skin} rx={s*0.3}
-          transform={`rotate(${-armSwing*0.4},1,17)`}/>
-        <rect x={12*s} y={17*s} width={3.5*s} height={10*s} fill={ch.suit} rx={s*0.5}
-          transform={`rotate(${armSwing*0.4},14,17)`}/>
-        <rect x={12.5*s} y={26*s} width={2.5*s} height={2.5*s} fill={ch.skin} rx={s*0.3}
-          transform={`rotate(${armSwing*0.4},14,17)`}/>
-        {ch.item === "briefcase" && (
-          <g transform={`rotate(${armSwing*0.4},14,17)`}>
-            <rect x={13*s} y={26*s} width={6*s} height={5*s} fill={ch.itemColor} rx={s*0.5}/>
-            <rect x={15*s} y={24.5*s} width={2*s} height={2.5*s} fill="none" stroke={ch.itemColor} strokeWidth={s*0.8}/>
-            <line x1={13*s} y1={29*s} x2={19*s} y2={29*s} stroke="#6B4423" strokeWidth={s*0.4}/>
-          </g>
-        )}
-        {ch.item === "clipboard" && (
-          <g transform={`rotate(${armSwing*0.4},14,17)`}>
-            <rect x={12*s} y={24*s} width={5*s} height={7*s} fill={ch.itemColor} rx={s*0.3}/>
-            <rect x={13*s} y={22.5*s} width={3*s} height={2*s} fill={ch.itemColor} rx={s*0.3}/>
-            <rect x={13*s} y={26*s} width={3*s} height={s} fill="#fff" opacity={0.6}/>
-            <rect x={13*s} y={28*s} width={2*s} height={s} fill="#fff" opacity={0.4}/>
-          </g>
-        )}
-        {ch.item === "folder" && (
-          <g transform={`rotate(${armSwing*0.4},14,17)`}>
-            <rect x={11*s} y={25*s} width={7*s} height={5*s} fill="#4a7acc" rx={s*0.3}/>
-            <rect x={11*s} y={25*s} width={7*s} height={1.5*s} fill="#3a6abb" rx={s*0.3}/>
-          </g>
-        )}
-        <rect x={2*s} y={5*s} width={11*s} height={11*s} fill={ch.skin} rx={s*1.5}/>
-        <rect x={4*s} y={8*s} width={2.5*s} height={2.5*s} fill="#1a1a2e"/>
-        <rect x={8.5*s} y={8*s} width={2.5*s} height={2.5*s} fill="#1a1a2e"/>
-        <rect x={4.5*s} y={8.2*s} width={s} height={s} fill="rgba(255,255,255,0.7)"/>
-        <rect x={9*s} y={8.2*s} width={s} height={s} fill="rgba(255,255,255,0.7)"/>
-        <rect x={5*s} y={12*s} width={5*s} height={s} fill="rgba(0,0,0,0.25)" rx={s*0.5}/>
-        <rect x={2.5*s} y={11*s} width={2*s} height={s} fill="#ffb8b0" opacity={0.5}/>
-        <rect x={10.5*s} y={11*s} width={2*s} height={s} fill="#ffb8b0" opacity={0.5}/>
-        {ch.glasses && (
-          <>
-            <rect x={3*s} y={7.5*s} width={4*s} height={3.5*s} fill="none" stroke="#1a1a1a" strokeWidth={s*0.6} rx={s*0.4}/>
-            <rect x={8*s} y={7.5*s} width={4*s} height={3.5*s} fill="none" stroke="#1a1a1a" strokeWidth={s*0.6} rx={s*0.4}/>
-            <line x1={7*s} y1={9*s} x2={8*s} y2={9*s} stroke="#1a1a1a" strokeWidth={s*0.5}/>
-            <line x1={1.5*s} y1={9*s} x2={3*s} y2={9*s} stroke="#1a1a1a" strokeWidth={s*0.5}/>
-            <line x1={12*s} y1={9*s} x2={13.5*s} y2={9*s} stroke="#1a1a1a" strokeWidth={s*0.5}/>
-          </>
-        )}
-        {ch.mask && (
-          <rect x={2.5*s} y={10*s} width={10*s} height={6*s} fill="#fff" rx={s*0.5} opacity={0.9}/>
-        )}
-        {ch.hairStyle === "short" && (
-          <>
-            <rect x={2*s} y={3*s} width={11*s} height={5*s} fill={ch.hair} rx={s}/>
-            <rect x={1*s} y={5*s} width={2*s} height={5*s} fill={ch.hair} rx={s*0.5}/>
-            <rect x={12*s} y={5*s} width={2*s} height={4*s} fill={ch.hair} rx={s*0.5}/>
-          </>
-        )}
-        {ch.hairStyle === "bob" && (
-          <>
-            <rect x={2*s} y={2*s} width={11*s} height={5*s} fill={ch.hair} rx={s}/>
-            <rect x={1*s} y={5*s} width={2*s} height={8*s} fill={ch.hair} rx={s*0.5}/>
-            <rect x={12*s} y={5*s} width={2*s} height={8*s} fill={ch.hair} rx={s*0.5}/>
-          </>
-        )}
-        {ch.hairStyle === "bun" && (
-          <>
-            <rect x={2*s} y={3*s} width={11*s} height={4*s} fill={ch.hair} rx={s}/>
-            <ellipse cx={11*s} cy={3*s} rx={3.5*s} ry={3*s} fill={ch.hair}/>
-          </>
-        )}
-        {ch.hairStyle === "ponytail" && (
-          <>
-            <rect x={2*s} y={2*s} width={11*s} height={4*s} fill={ch.hair} rx={s}/>
-            <rect x={11*s} y={5*s} width={3*s} height={12*s} fill={ch.hair} rx={s*0.5}/>
-          </>
-        )}
-        {ch.hairStyle === "messy" && (
-          <>
-            <rect x={1.5*s} y={2*s} width={12*s} height={5*s} fill={ch.hair} rx={s}/>
-            <rect x={0.5*s} y={4*s} width={2*s} height={4*s} fill={ch.hair} rx={s*0.5}/>
-            <rect x={3*s} y={1*s} width={3*s} height={3*s} fill={ch.hair} rx={s*0.5}/>
-            <rect x={9*s} y={1*s} width={3*s} height={3*s} fill={ch.hair} rx={s*0.5}/>
-          </>
-        )}
-        {ch.hairStyle === "cap_blue" && (
-          <>
-            <rect x={2*s} y={3*s} width={11*s} height={4*s} fill={ch.hair} rx={s}/>
-            <rect x={1*s} y={2*s} width={13*s} height={4*s} fill="#3366cc" rx={s*0.5}/>
-            <rect x={0*s} y={4.5*s} width={15*s} height={2*s} fill="#2255bb" rx={s*0.3}/>
-          </>
-        )}
-        {ch.hairStyle === "cap_green" && (
-          <>
-            <rect x={2*s} y={3*s} width={11*s} height={4*s} fill={ch.hair} rx={s}/>
-            <rect x={1*s} y={2*s} width={13*s} height={4*s} fill="#2a6b3a" rx={s*0.5}/>
-            <rect x={0*s} y={4.5*s} width={15*s} height={2*s} fill="#1a5a2a" rx={s*0.3}/>
-          </>
-        )}
-        {ch.senior && (
-          <>
-            <rect x={0*s} y={6*s} width={2*s} height={5*s} fill="#888" rx={s*0.5}/>
-            <rect x={13*s} y={6*s} width={2*s} height={5*s} fill="#888" rx={s*0.5}/>
-            <rect x={0*s} y={5*s} width={15*s} height={2.5*s} fill="#888" rx={s}/>
-          </>
-        )}
-      </g>
-    </g>
-  );
-}
-
-/* ============================================================
-   WALKING CHARACTER
-============================================================ */
-function WalkingChar({ roomW, floorY, charType, speed = 0.5, startX }: {
-  roomW: number; floorY: number; charType: string; speed?: number; startX?: number;
-}) {
-  const posRef = useRef(startX || Math.random() * (roomW - 30) + 15);
-  const dirRef = useRef(Math.random() > 0.5 ? 1 : -1);
-  const frameRef = useRef(0);
-  const [state, setState] = useState({ x: posRef.current, dir: dirRef.current, frame: 0 });
-  const pauseRef = useRef(false);
-  const pauseTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  useEffect(() => {
-    const interval = setInterval(() => {
-      if (Math.random() < 0.005 && !pauseRef.current) {
-        pauseRef.current = true;
-        if (pauseTimer.current) clearTimeout(pauseTimer.current);
-        pauseTimer.current = setTimeout(() => { pauseRef.current = false; }, 1500 + Math.random() * 2000);
-      }
-      if (pauseRef.current) return;
-
-      posRef.current += dirRef.current * speed;
-      frameRef.current = (frameRef.current + 1) % 4;
-
-      if (posRef.current > roomW - 18 || posRef.current < 18) {
-        dirRef.current *= -1;
-        posRef.current += dirRef.current * speed * 2;
-      }
-
-      setState({ x: posRef.current, dir: dirRef.current, frame: frameRef.current });
-    }, 90);
-    return () => { clearInterval(interval); if (pauseTimer.current) clearTimeout(pauseTimer.current); };
-  }, [roomW, speed]);
-
-  return (
-    <g transform={`translate(${state.x - 7},${floorY - 42})`}>
-      <PixelChar
-        type={charType}
-        scale={1.0}
-        frame={pauseRef.current ? 0 : state.frame}
-        facing={state.dir}
-      />
-    </g>
-  );
-}
-
-/* ============================================================
-   PIXEL ROOM CONFIGS
-============================================================ */
-const DEPT_ROOM_CONFIGS: Record<string, any> = {
-  dev: {
-    label:"開発部 / DEV", color:"#22d3ee",
-    wall:"#020c18", floor:"#041525",
-    chars:[
-      {type:"shirt_white_glasses", speed:0.3, startX:50},
-      {type:"shirt_casual_glasses", speed:0.4, startX:120},
-      {type:"suit_gray_blue", speed:0.25, startX:200},
-    ],
-    furniture: (W: number, H: number, FLOOR: number) => (
-      <g>
-        {[20,95,170].map((x,i)=>(
-          <g key={i}>
-            <rect x={x} y={FLOOR-65} width={60} height={40} fill="#0a1520" stroke="#22d3ee" strokeWidth={1} rx={2}/>
-            <rect x={x+2} y={FLOOR-63} width={56} height={36} fill="#020c18"/>
-            {[0,1,2,3,4,5,6,7].map(j=>(
-              <rect key={j} x={x+4} y={FLOOR-61+j*4.5} width={[30,45,20,38,25,42,18,35][j]} height={2.5}
-                fill={["#22d3ee","#8b5cf6","#4ade80","#22d3ee","#f59e0b","#ec4899","#22d3ee","#8b5cf6"][j]}
-                opacity={0.7}/>
+        <div style={{flex:1,padding:14,background:C.card,border:`1px solid ${p.color}33`,borderRadius:3}}>
+          <div style={{fontFamily:FONT,fontSize:5,color:p.color,marginBottom:8}}>{p.icon} プレビュー</div>
+          <div style={{fontFamily:MONO,fontSize:11.5,color:content?C.text:C.muted,lineHeight:1.9,whiteSpace:"pre-wrap"}}>{content||"ここにプレビュー"}</div>
+        </div>
+        <div style={{padding:"10px 14px",background:C.card,border:`1px solid ${C.border}`,borderRadius:3}}>
+          <div style={{fontFamily:FONT,fontSize:4,color:C.muted,marginBottom:6}}>⏰ 推奨投稿時間</div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
+            {[{t:"07:30",l:"通勤"},{t:"12:00",l:"昼休み"},{t:"19:00",l:"夕方"},{t:"21:30",l:"夜"}].map(r=>(
+              <div key={r.t} onClick={()=>{const d=new Date();const[h,m]=r.t.split(":").map(Number);d.setHours(h,m,0,0);setSchedAt(d.toISOString().slice(0,16));}}
+                style={{textAlign:"center",padding:"5px",background:C.surface,borderRadius:1,cursor:"pointer"}}>
+                <div style={{fontFamily:FONT,fontSize:6,color:C.gold}}>{r.t}</div>
+                <div style={{fontFamily:MONO,fontSize:8,color:C.muted}}>{r.l}</div>
+              </div>
             ))}
-            <rect x={x+4} y={FLOOR-26} width={4} height={3} fill="#22d3ee" opacity={0.9}>
-              <animate attributeName="opacity" values="0.9;0;0.9" dur="1.2s" repeatCount="indefinite"/>
-            </rect>
-            <rect x={x+26} y={FLOOR-25} width={8} height={6} fill="#1e293b"/>
-            <rect x={x+18} y={FLOOR-20} width={24} height={3} fill="#1e293b"/>
-          </g>
-        ))}
-        {[8,83,158].map((x,i)=>(
-          <rect key={i} x={x} y={FLOOR-22} width={74} height={6} fill="#1a2a3a" rx={1}/>
-        ))}
-        <rect x={74} y={FLOOR-30} width={8} height={10} fill="#92400e" rx={1}/>
-        <rect x={75} y={FLOOR-32} width={6} height={3} fill="#6b7280" rx={1}/>
-        <rect x={235} y={FLOOR-80} width={15} height={62} fill="#0a1520"/>
-        {[0,1,2,3,4,5,6].map(i=>(
-          <rect key={i} x={236} y={FLOOR-78+i*10} width={13} height={9}
-            fill={["#3b82f6","#8b5cf6","#22d3ee","#4ade80","#f59e0b","#3b82f6","#ec4899"][i]}
-            opacity={0.8} rx={1}/>
-        ))}
-        <rect x={0} y={FLOOR-28} width={10} height={10} fill="#166534" rx={1}/>
-        <ellipse cx={5} cy={FLOOR-28} rx={10} ry={10} fill="#16a34a"/>
-        <ellipse cx={0} cy={FLOOR-32} rx={7} ry={7} fill="#15803d"/>
-      </g>
-    ),
-  },
-  pr: {
-    label:"広報部 / PR", color:"#ec4899",
-    wall:"#0d0118", floor:"#150828",
-    chars:[
-      {type:"suit_pink_female", speed:0.35, startX:60},
-      {type:"suit_lightblue_female", speed:0.4, startX:160},
-    ],
-    furniture: (W: number, H: number, FLOOR: number) => (
-      <g>
-        <rect x={10} y={FLOOR-90} width={130} height={75} fill="#06000f" stroke="#ec4899" strokeWidth={1.5} rx={2}/>
-        <rect x={12} y={FLOOR-88} width={126} height={71} fill="#030008"/>
-        <rect x={14} y={FLOOR-86} width={35} height={60} fill="#0a0014" rx={2}/>
-        <rect x={16} y={FLOOR-70} width={31} height={30} fill="#1a0528"/>
-        <text x={20} y={FLOOR-52} fontSize={8} fill="#ec4899" style={{fontFamily:"monospace"}}>{"♥"}</text>
-        <text x={18} y={FLOOR-44} fontSize={7} fill="#ec4899" style={{fontFamily:"monospace"}}>12.4K</text>
-        <rect x={52} y={FLOOR-86} width={82} height={60} fill="#030008"/>
-        {[0,1,2,3,4,5].map(i=>(
-          <rect key={i} x={55+i*13} y={FLOOR-50-[20,35,15,42,28,38][i]} width={10} height={[20,35,15,42,28,38][i]}
-            fill="#ec4899" opacity={0.6+i*0.06} rx={1}/>
-        ))}
-        <line x1={53} y1={FLOOR-50} x2={133} y2={FLOOR-50} stroke="#ec4899" strokeWidth={0.5} opacity={0.3}/>
-        {([["#ff0050","♪",153],["#fff","@",175],["#1d9bf0","✕",197],["#41c9b4","n",219]] as [string,string,number][]).map(([c,ico,x])=>(
-          <g key={x}>
-            <rect x={x} y={FLOOR-55} width={18} height={18} fill={c==="#fff"?"#111":c}
-              opacity={0.9} rx={3}/>
-            <text x={x+4} y={FLOOR-42} fontSize={10} fill="#fff" style={{fontFamily:"monospace"}}>{ico}</text>
-          </g>
-        ))}
-        <circle cx={220} cy={FLOOR-75} r={18} fill="none" stroke="#ec4899" strokeWidth={4} opacity={0.15}/>
-        <circle cx={220} cy={FLOOR-75} r={12} fill="none" stroke="#ec4899" strokeWidth={2} opacity={0.1}/>
-        <circle cx={220} cy={FLOOR-75} r={6} fill="#0d0118" stroke="#ec4899" strokeWidth={1}/>
-        <rect x={5} y={FLOOR-22} width={145} height={6} fill="#2d0d4a" rx={1}/>
-        <rect x={155} y={FLOOR-22} width={85} height={6} fill="#2d0d4a" rx={1}/>
-        <rect x={232} y={FLOOR-30} width={8} height={12} fill="#166534" rx={1}/>
-        <ellipse cx={236} cy={FLOOR-32} rx={9} ry={8} fill="#ec4899" opacity={0.5}/>
-        <ellipse cx={236} cy={FLOOR-32} rx={5} ry={5} fill="#f9a8d4"/>
-      </g>
-    ),
-  },
-  sales: {
-    label:"営業部 / SALES", color:"#f59e0b",
-    wall:"#0a0a06", floor:"#12120a",
-    chars:[
-      {type:"suit_navy_red", speed:0.45, startX:40},
-      {type:"suit_brown_orange", speed:0.3, startX:130},
-      {type:"suit_gray_senior", speed:0.35, startX:200},
-    ],
-    furniture: (W: number, H: number, FLOOR: number) => (
-      <g>
-        <rect x={10} y={FLOOR-95} width={120} height={78} fill="#f8f9f0" stroke="#d4a017" strokeWidth={2} rx={2}/>
-        <rect x={10} y={FLOOR-95} width={120} height={10} fill="#d4a017" rx={2}/>
-        <text x={15} y={FLOOR-88} fontSize={5} fill="#1a1a1a" style={{fontFamily:"monospace"}}>Q2 TARGET</text>
-        {[0,1,2,3,4].map(i=>(
-          <rect key={i} x={18+i*22} y={FLOOR-50-[25,38,18,48,32][i]} width={16} height={[25,38,18,48,32][i]}
-            fill={["#f59e0b","#10b981","#ef4444","#3b82f6","#f97316"][i]} opacity={0.8} rx={1}/>
-        ))}
-        <line x1={12} y1={FLOOR-50} x2={128} y2={FLOOR-50} stroke="#94a3b8" strokeWidth={0.5}/>
-        {["A社","B社","C社","D社","E社"].map((l,i)=>(
-          <text key={l} x={19+i*22} y={FLOOR-42} fontSize={4} fill="#374151" style={{fontFamily:"monospace"}}>{l}</text>
-        ))}
-        <line x1={12} y1={FLOOR-70} x2={128} y2={FLOOR-70} stroke="#ef4444" strokeWidth={1} strokeDasharray="4,2"/>
-        <rect x={138} y={FLOOR-92} width={100} height={75} fill="#0a0a06" stroke="#f59e0b" strokeWidth={1} rx={2}/>
-        <rect x={138} y={FLOOR-92} width={100} height={12} fill="#1a1a0a"/>
-        <text x={142} y={FLOOR-83} fontSize={5} fill="#f59e0b" style={{fontFamily:"monospace"}}>INBOX</text>
-        {[{f:"A社 田中様",s:"ご提案について",n:true},{f:"B社 鈴木様",s:"お見積もりの件",n:true},
-          {f:"C社 山田様",s:"デモのご依頼",n:false},{f:"D社 佐藤様",s:"フォローアップ",n:false}].map((e,i)=>(
-          <g key={i}>
-            <rect x={140} y={FLOOR-78+i*15} width={96} height={13}
-              fill={e.n?"rgba(245,158,11,0.08)":"transparent"}
-              stroke={e.n?"#f59e0b":"#1e2a0a"} strokeWidth={0.5} rx={1}/>
-            {e.n && <rect x={140} y={FLOOR-78+i*15} width={3} height={13} fill="#f59e0b" rx={1}/>}
-            <text x={146} y={FLOOR-70+i*15} fontSize={4} fill={e.n?"#f59e0b":"#6b7280"} style={{fontFamily:"monospace"}}>{e.f}</text>
-            <text x={146} y={FLOOR-65+i*15} fontSize={3.5} fill="#4b5563" style={{fontFamily:"monospace"}}>{e.s}</text>
-          </g>
-        ))}
-        <rect x={5} y={FLOOR-22} width={125} height={6} fill="#1e2a0a" rx={1}/>
-        <rect x={135} y={FLOOR-22} width={105} height={6} fill="#1e2a0a" rx={1}/>
-        <rect x={240} y={FLOOR-28} width={10} height={10} fill="#166534" rx={1}/>
-        <ellipse cx={245} cy={FLOOR-30} rx={12} ry={10} fill="#166534"/>
-      </g>
-    ),
-  },
-  finance: {
-    label:"財務部 / FINANCE", color:"#facc15",
-    wall:"#0a0800", floor:"#141000",
-    chars:[
-      {type:"suit_gray_senior", speed:0.3, startX:80},
-      {type:"suit_navy_red", speed:0.25, startX:180},
-    ],
-    furniture: (W: number, H: number, FLOOR: number) => (
-      <g>
-        <rect x={10} y={FLOOR-95} width={150} height={78} fill="#080600" stroke="#facc15" strokeWidth={1.5} rx={2}/>
-        <rect x={10} y={FLOOR-95} width={150} height={10} fill="#1a1000"/>
-        <text x={14} y={FLOOR-88} fontSize={5} fill="#facc15" style={{fontFamily:"monospace"}}>MRR DASHBOARD</text>
-        {[0,1,2,3,4,5].map(i=>(
-          <rect key={i} x={18+i*24} y={FLOOR-60-[30,45,32,58,42,55][i]}
-            width={18} height={[30,45,32,58,42,55][i]}
-            fill="#facc15" opacity={i===5?1:0.5} rx={1}/>
-        ))}
-        <line x1={14} y1={FLOOR-60} x2={158} y2={FLOOR-60} stroke="#facc15" strokeWidth={0.5} opacity={0.3}/>
-        {["11月","12月","1月","2月","3月","4月"].map((l,i)=>(
-          <text key={l} x={18+i*24} y={FLOOR-53} fontSize={3.5} fill="#92400e" style={{fontFamily:"monospace"}}>{l}</text>
-        ))}
-        <text x={14} y={FLOOR-78} fontSize={8} fill="#facc15" style={{fontFamily:"monospace"}}>{"¥64万"}</text>
-        <text x={80} y={FLOOR-78} fontSize={5} fill="#4ade80" style={{fontFamily:"monospace"}}>{"↑14%"}</text>
-        <rect x={168} y={FLOOR-95} width={75} height={78} fill="#08060a" stroke="#facc15" strokeWidth={1} rx={2}/>
-        <text x={172} y={FLOOR-87} fontSize={4.5} fill="#facc15" style={{fontFamily:"monospace"}}>STRIPE</text>
-        {[{n:"田中",a:"¥3,980"},{n:"Kim",a:"¥980"},{n:"鈴木",a:"¥3,980"},{n:"佐藤",a:"¥480"}].map((t,i)=>(
-          <g key={i}>
-            <rect x={170} y={FLOOR-82+i*16} width={71} height={13} fill="rgba(250,204,21,0.05)" stroke="#facc1522" rx={1}/>
-            <text x={173} y={FLOOR-74+i*16} fontSize={4} fill="#facc15" style={{fontFamily:"monospace"}}>{t.n}</text>
-            <text x={210} y={FLOOR-74+i*16} fontSize={4} fill="#4ade80" style={{fontFamily:"monospace"}}>{t.a}</text>
-          </g>
-        ))}
-        <rect x={5} y={FLOOR-22} width={155} height={6} fill="#1a1000" rx={1}/>
-        <rect x={163} y={FLOOR-22} width={80} height={6} fill="#1a1000" rx={1}/>
-      </g>
-    ),
-  },
-};
-
-/* ============================================================
-   DEPT ROOM COMPONENT
-============================================================ */
-function DeptRoom({ deptId, selected, onClick }: {
-  deptId: string; selected: boolean; onClick: () => void;
-}) {
-  const cfg = DEPT_ROOM_CONFIGS[deptId];
-  if (!cfg) return null;
-  const W = 260;
-  const H = 165;
-  const FLOOR = Math.round(H * 0.72);
-
-  return (
-    <div
-      onClick={onClick}
-      style={{
-        cursor: "pointer", position: "relative",
-        border: `2px solid ${selected ? cfg.color : cfg.color + "44"}`,
-        boxShadow: selected ? `0 0 20px ${cfg.color}55` : "none",
-        transform: selected ? "scale(1.02)" : "scale(1)",
-        transition: "all 0.15s", borderRadius: 2, overflow: "hidden",
-      }}
-    >
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
-        <defs>
-          <linearGradient id={`wall-${deptId}`} x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%" stopColor={cfg.wall}/>
-            <stop offset="100%" stopColor={cfg.wall} stopOpacity={0.8}/>
-          </linearGradient>
-        </defs>
-        <rect width={W} height={H} fill={`url(#wall-${deptId})`}/>
-        {Array.from({length:Math.ceil(W/30)},(_,i)=>(
-          <line key={`v${i}`} x1={i*30} y1={0} x2={i*30} y2={FLOOR}
-            stroke={cfg.color} strokeWidth={0.3} opacity={0.07}/>
-        ))}
-        {Array.from({length:4},(_,i)=>(
-          <line key={`h${i}`} x1={0} y1={i*25} x2={W} y2={i*25}
-            stroke={cfg.color} strokeWidth={0.3} opacity={0.07}/>
-        ))}
-        <rect x={W/2-30} y={0} width={60} height={3} fill={cfg.color} opacity={0.4}/>
-        <ellipse cx={W/2} cy={0} rx={45} ry={18} fill={cfg.color} opacity={0.04}/>
-        <rect x={0} y={FLOOR} width={W} height={H-FLOOR} fill={cfg.floor}/>
-        <line x1={0} y1={FLOOR} x2={W} y2={FLOOR} stroke={cfg.color} strokeWidth={1.5} opacity={0.3}/>
-        {Array.from({length:Math.ceil(W/25)},(_,i)=>(
-          <line key={i} x1={i*25} y1={FLOOR} x2={i*25} y2={H}
-            stroke={cfg.color} strokeWidth={0.3} opacity={0.08}/>
-        ))}
-        {cfg.furniture(W, H, FLOOR)}
-        {cfg.chars.map((ch: any, i: number) => (
-          <WalkingChar
-            key={i}
-            roomW={W - 20}
-            floorY={FLOOR}
-            charType={ch.type}
-            speed={ch.speed}
-            startX={ch.startX}
-          />
-        ))}
-        <circle cx={W-10} cy={8} r={3} fill="#4ade80">
-          <animate attributeName="opacity" values="1;0.3;1" dur="2s" repeatCount="indefinite"/>
-        </circle>
-        <rect x={0} y={0} width={W} height={14} fill={cfg.color} opacity={0.1}/>
-        <text x={6} y={10} fontSize={6} fill={cfg.color}
-          style={{ fontFamily: FONT }}>
-          {cfg.label}
-        </text>
-        <rect x={0} y={0} width={W-1} height={H-1} fill="none"
-          stroke={cfg.color} strokeWidth={selected ? 2 : 1}
-          opacity={selected ? 1 : 0.4}/>
-      </svg>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
 
-/* ============================================================
-   MAIN GAME SCREEN
-============================================================ */
-const INITIAL_DEPTS = [
-  { id:"dev", name:"開発部", icon:"⌨", color:"#22d3ee",
-    level:8, hp:85, maxHp:100, perf:78, xp:340, xpNext:500,
-    todayValue:"3PR", todayLabel:"マージ数", todayColor:"#22d3ee", trend:50,
-    status:"🔥 スプリント中", statusColor:"#f97316", statusAnim:true,
-    quests:[
-      {id:"q1",title:"PR #142 マージ完了",desc:"レビュー待ちのPRをマージする",diff:"A",xp:120,progress:100,done:false},
-      {id:"q2",title:"テストカバレッジ80%達成",desc:"現在62% → 80%まで引き上げる",diff:"B",xp:200,progress:62,done:false},
-      {id:"q3",title:"Vercel本番デプロイ",desc:"ステージングで確認後、本番反映",diff:"S",xp:300,progress:0,done:false},
-    ]
-  },
-  { id:"pr", name:"広報部", icon:"◈", color:"#ec4899",
-    level:6, hp:92, maxHp:100, perf:88, xp:180, xpNext:300,
-    todayValue:"6本", todayLabel:"投稿数", todayColor:"#ec4899", trend:20,
-    status:"⚡ 絶好調", statusColor:"#4ade80",
-    quests:[
-      {id:"q4",title:"TikTok 3本投稿",desc:"15:00のスケジュール投稿を完遂",diff:"B",xp:80,progress:100,done:true},
-      {id:"q5",title:"note記事 1,000PV",desc:"本日公開の記事を1,000PV達成",diff:"A",xp:150,progress:72,done:false},
-    ]
-  },
-  { id:"sales", name:"営業部", icon:"◆", color:"#f59e0b",
-    level:7, hp:70, maxHp:100, perf:65, xp:420, xpNext:500,
-    todayValue:"¥48万", todayLabel:"商談額", todayColor:"#f59e0b", trend:-5,
-    status:"⚠ 要注意", statusColor:"#f59e0b", statusAnim:true,
-    quests:[
-      {id:"q6",title:"A社 最終提案送付",desc:"本日18:00までに提案書を送る",diff:"S",xp:400,progress:45,done:false},
-      {id:"q7",title:"新規コンタクト5社",desc:"ターゲットリストから5社にメール",diff:"B",xp:100,progress:60,done:false},
-    ]
-  },
-  { id:"finance", name:"財務部", icon:"💰", color:"#facc15",
-    level:5, hp:100, maxHp:100, perf:95, xp:60, xpNext:200,
-    todayValue:"87%", todayLabel:"目標達成率", todayColor:"#4ade80", trend:3,
-    status:"✦ 安定", statusColor:"#4ade80",
-    quests:[
-      {id:"q8",title:"月次P/L確認完了",desc:"全APIコストと売上を突き合わせ",diff:"C",xp:50,progress:100,done:true},
-    ]
-  },
-];
-
-const ACHIEVEMENTS_LIST = [
-  { id:"a1", name:"初回デプロイ", icon:"🚀", desc:"本番環境に初めてデプロイした", unlocked:true },
-  { id:"a2", name:"MRR ¥50万突破", icon:"💰", desc:"月次売上が50万円を超えた", unlocked:true },
-  { id:"a3", name:"SNS職人", icon:"◈", desc:"1日10本以上投稿した", unlocked:false },
-  { id:"a4", name:"全部署Lv.10", icon:"⭐", desc:"すべての部署をLv.10にした", unlocked:false },
-  { id:"a5", name:"ゼロダウンタイム", icon:"🛡", desc:"30日間無停止運用を達成", unlocked:false },
-  { id:"a6", name:"AIマスター", icon:"🤖", desc:"Claude APIを1000回使用した", unlocked:false },
-  { id:"a7", name:"ユーザー1000人", icon:"👥", desc:"登録ユーザーが1000人を超えた", unlocked:true },
-  { id:"a8", name:"完全自動化", icon:"⚙", desc:"全9ボットが1週間無停止稼働", unlocked:false },
-];
-
-export default function CompanyOSGame() {
-  const [depts, setDepts] = useState(INITIAL_DEPTS);
-  const [selectedDept, setSelectedDept] = useState(null);
-  const [advice, setAdvice] = useState("");
-  const [adviceLoading, setAdviceLoading] = useState(false);
-  const [levelUp, setLevelUp] = useState(null);
-  const [achievement, setAchievement] = useState(null);
-  const [tab, setTab] = useState("map");
-  const [totalXP, setTotalXP] = useState(2840);
-  const [companyLevel] = useState(12);
-
-  const [revenue, setRevenue] = useState(0);
-  const [cost, setCost] = useState(0);
-  const [liveStats, setLiveStats] = useState(null);
-
-  // Fetch real data from Supabase via /api/stats
-  const fetchStats = useCallback(async () => {
-    try {
-      const res = await fetch("/api/stats");
-      if (!res.ok) return;
-      const data = await res.json();
-      setRevenue(data.revenue.total);
-      setCost(data.cost.total);
-      setLiveStats(data);
-    } catch {}
-  }, []);
-
-  useEffect(() => {
-    fetchStats(); // initial
-    const i = setInterval(fetchStats, 60000); // refresh every 60s
-    return () => clearInterval(i);
-  }, [fetchStats]);
-
-  const profit = revenue - cost;
-
-  const completeQuest = useCallback((questId) => {
-    let earnedXP = 0;
-    setDepts(prev => prev.map(dept => {
-      const quest = dept.quests.find(q=>q.id===questId);
-      if (!quest) return dept;
-      earnedXP = quest.xp;
-      const newXP = dept.xp + quest.xp;
-      const leveled = newXP >= dept.xpNext;
-      if (leveled) {
-        setTimeout(()=>setLevelUp({dept:dept.name, level:dept.level+1}), 300);
-      }
-      return {
-        ...dept,
-        xp: leveled ? newXP - dept.xpNext : newXP,
-        level: leveled ? dept.level+1 : dept.level,
-        quests: dept.quests.map(q=>q.id===questId?{...q,done:true}:q),
-      };
-    }));
-    setTotalXP(x=>x+earnedXP);
-    if (Math.random() > 0.6) {
-      const locked = ACHIEVEMENTS_LIST.filter(a=>!a.unlocked);
-      if (locked.length > 0) {
-        setAchievement(locked[Math.floor(Math.random()*locked.length)]);
-      }
+/* ─── EXECUTION ENGINE ─── */
+async function exec(
+  task:Task,
+  addLog:(id:string,type:string,text:string)=>void,
+  upd:(id:string,u:Partial<Task>)=>void,
+  spawn:(parent:Task,agent:AgentId,title:string,goal:string,xp:number,tags:string[])=>Task,
+  autoApprove:boolean,
+){
+  const log=(t:string,m:string)=>addLog(task.id,t,m);
+  upd(task.id,{status:"running",started_at:now()});
+  const finish=(output:string,xp=task.xp)=>{
+    upd(task.id,{status:"auto_approved",done_at:now(),output,auto_approved:true,xp});
+    log("auto",autoApprove?"⚡ 自動承認 → 完了":"✓ 完了");
+  };
+  try{
+    if(task.agent==="ceo"){
+      log("think",`目標を戦略分析中: 「${task.goal.slice(0,50)}」`);await wait(500);
+      type Plan={agent:AgentId;title:string;description:string;priority:Priority;xp:number;tags:string[]}[];
+      const plan=await askJSON<Plan>(AGENTS.ceo.sys,`目標: ${task.goal}\n\nタスクを3〜5個に分解してください。devタスクには必ずqaを後続させてください。`);
+      if(!plan?.length){log("error","分解失敗");upd(task.id,{status:"failed"});return;}
+      log("result",`✦ ${plan.length}つの作戦`);
+      plan.forEach((p,i)=>log("delegate",`${i+1}. [${AGENTS[p.agent]?.name||p.agent}] ${p.title}`));
+      plan.forEach(p=>spawn(task,p.agent,p.title,p.description,p.xp||120,p.tags||[]));
+      upd(task.id,{status:"done",done_at:now(),output:plan.map(p=>`【${AGENTS[p.agent]?.name}】${p.title}\n${p.description}`).join("\n\n"),xp:60});
+      return;
     }
-  }, []);
+    if(task.agent==="dev"){
+      log("think","アーキテクチャ設計中...");await wait(400);log("code","実装中...");
+      let out="";
+      await stream(AGENTS.dev.sys,[{role:"user",content:`実装:\n${task.goal}\n\nNext.js 14+TypeScript+Supabaseで完全コードをファイルパス付きで提供してください。型定義・エラーハンドリング含む。`}],c=>{out+=c;upd(task.id,{output:out});},1500);
+      log("result","実装完了 → QAに送信");
+      finish(out,200);
+      if(out.length>100)spawn(task,"qa",`QA: ${task.title}`,"以下のコードをQAして自動修正してください:\n\n"+out.slice(0,2500),150,["auto-qa"]);
+      return;
+    }
+    if(task.agent==="qa"){
+      const MAX=3;let code=task.goal;let cycles=0;
+      while(cycles<MAX){
+        cycles++;upd(task.id,{status:"qa_running",qa_cycles:cycles});
+        log("qa",`QAサイクル ${cycles}/${MAX} — 静的解析中...`);await wait(600);
+        type QR={bugs:{severity:string;desc:string;fix:string}[];test_code:string;deploy_ok:boolean;fixed_code:string};
+        const r=await askJSON<QR>(AGENTS.qa.sys,`コードをQAしてください:\n\n${code.slice(0,3000)}\n\nバグを発見して修正し、テストコードも書いてください。`);
+        if(!r){log("error","解析失敗 → スキップ");break;}
+        const crits=r.bugs.filter(b=>b.severity==="critical").length;
+        const highs=r.bugs.filter(b=>b.severity==="high").length;
+        log("qa",`検出: critical×${crits} high×${highs} 合計×${r.bugs.length}`);
+        if(r.deploy_ok||r.bugs.length===0){
+          log("result",`✦ QA合格 (${cycles}サイクル) — デプロイ可能`);
+          const out=`## QAレポート (${cycles}サイクル)\n### バグ\n${r.bugs.map(b=>`- [${b.severity}] ${b.desc}`).join("\n")||"なし"}\n\n### テスト\n\`\`\`ts\n${r.test_code||""}\n\`\`\`\n\n### 修正済みコード\n${r.fixed_code||code}`;
+          upd(task.id,{status:"done",done_at:now(),output:out,qa_passed:true,xp:200,auto_approved:true,qa_cycles:cycles});
+          log("deploy","✅ QA合格 → 自動デプロイへ");return;
+        }
+        upd(task.id,{status:"qa_fixing",qa_cycles:cycles});
+        log("fix",`${r.bugs.length}件を自動修正中...`);
+        r.bugs.forEach(b=>log("fix",`  [${b.severity}] ${b.desc}`));
+        await wait(800);
+        if(r.fixed_code){code=r.fixed_code;log("result",`修正完了 → 再検証`);}
+        else{log("error","修正コード取得失敗");break;}
+      }
+      const out=`## QAレポート (${cycles}サイクル完了)\n修正を実施しました。現状でデプロイします。`;
+      log("auto",`最大${MAX}サイクル完了 → デプロイ`);
+      upd(task.id,{status:"done",done_at:now(),output:out,qa_cycles:cycles,xp:180,auto_approved:true});
+      return;
+    }
+    if(task.agent==="pr"){
+      log("think","バズ戦略策定中...");await wait(400);log("action","コンテンツ生成中...");
+      let out="";
+      await stream(AGENTS.pr.sys,[{role:"user",content:`SNSコンテンツ作成:\n${task.goal}\n\nTikTok・Threads・X・note・Instagram・YouTube向けの完成形投稿文を、ハッシュタグ・バズ予測スコア(0-100)込みで提供してください。`}],c=>{out+=c;upd(task.id,{output:out});},1000);
+      log("post","✦ 全プラットフォーム生成完了");finish(out,130);return;
+    }
+    if(task.agent==="sales"){
+      log("think","ターゲット分析中...");await wait(400);log("search","企業リサーチ中...");await wait(600);log("email","メール生成中...");
+      let out="";
+      await stream(AGENTS.sales.sys,[{role:"user",content:`営業:\n${task.goal}\n\n件名・本文・PS・フォローアップ3回分を一式で。`}],c=>{out+=c;upd(task.id,{output:out});},900);
+      log("result","✦ 営業メール完成");finish(out,140);return;
+    }
+    if(task.agent==="research"){
+      log("think","調査計画中...");await wait(400);log("search","データ収集中...");await wait(700);log("action","分析中...");
+      let out="";
+      await stream(AGENTS.research.sys,[{role:"user",content:`調査:\n${task.goal}\n\nデータ・数値・事例・アクション提言付きで。`}],c=>{out+=c;upd(task.id,{output:out});},900);
+      log("result","✦ 調査完了");finish(out,160);return;
+    }
+    if(task.agent==="automation"){
+      log("think","自動化設計中...");await wait(500);
+      let out="";
+      await stream(AGENTS.automation.sys,[{role:"user",content:`自動化:\n${task.goal}\n\nPython・GitHub Actions・Supabase Edge Functionで動作するコードとセットアップ手順を。`}],c=>{out+=c;upd(task.id,{output:out});},1200);
+      log("deploy","✦ 自動化設計完了");finish(out,190);
+      if(out.length>100)spawn(task,"qa",`QA: ${task.title}`,"以下の自動化コードをQAして:\n\n"+out.slice(0,2500),120,["auto-qa"]);
+      return;
+    }
+    if(task.agent==="analyst"){
+      log("action","データ分析中...");await wait(500);
+      let out="";
+      await stream(AGENTS.analyst.sys,[{role:"user",content:`分析:\n${task.goal}\n\nKPI・トレンド・改善提言込みのレポートを。`}],c=>{out+=c;upd(task.id,{output:out});},900);
+      log("result","✦ 分析レポート完成");finish(out,110);return;
+    }
+  }catch(e:any){log("error",`エラー: ${e.message}`);upd(task.id,{status:"failed",done_at:now()});}
+}
 
-  const askAdvisor = useCallback(async (question) => {
-    setAdviceLoading(true); setAdvice(""); setTab("advisor");
-    const deptSummary = depts.map(d=>
-      `${d.name}: Lv${d.level} HP${d.hp}% パフォーマンス${d.perf}% 今日${d.todayValue}`
-    ).join(", ");
-    const sys = `あなたは経営戦略AIアドバイザーです。ゲームのキャラクターのように、
-具体的な数値と短いアクションアイテムで回答してください。
-絵文字を使い、RPGのクエスト提案のようなトーンで。100字以内で簡潔に。`;
-    const usr = `質問: ${question}
-今日の収支: 売上¥${revenue.toLocaleString()} コスト¥${cost.toLocaleString()} 利益¥${profit.toLocaleString()}
-部署状況: ${deptSummary}`;
-    try {
-      let full="";
-      await callClaude(sys, usr, c=>{full+=c; setAdvice(full);});
-    } catch(e) { setAdvice("⚠ 魔法が失敗しました: "+e.message); }
-    setAdviceLoading(false);
-  }, [depts, revenue, cost, profit]);
+/* ─── ROOT ─── */
+export default function CompanyOSv6(){
+  const[tasks,setTasks]          =useState<Task[]>([]);
+  const[expanded,setExpanded]    =useState<Set<string>>(new Set());
+  const[screen,setScreen]        =useState<"tasks"|"sns"|"scheduler"|"agents"|"health">("tasks");
+  const[goalInput,setGoalInput]  =useState("");
+  const[priority,setPriority]    =useState<Priority>("high");
+  const[autoApprove,setAutoApprove]=useState(true); // デフォルトON
+  const[cmdOpen,setCmdOpen]      =useState(false);
+  const[posts,setPosts]          =useState<SNSPost[]>([]);
+  const[totalXP,setTotalXP]      =useState(14820);
+  const[xpFlash,setXpFlash]      =useState(false);
+  const[schedules,setSchedules]  =useState<Schedule[]>([
+    {id:"1",name:"週次戦略会議",goal:"今週の状況を分析して戦略を立ててください",agent:"ceo",label:"毎週月曜 9:00",enabled:true,runs:14,next:now()+86400000*2},
+    {id:"2",name:"日次SNS計画",goal:"今日のSNS投稿コンテンツを全プラットフォーム向けに生成してください",agent:"pr",label:"毎日 8:00",enabled:true,runs:52},
+    {id:"3",name:"コスト監視",goal:"APIコストと売上を確認して異常があれば対策を提案してください",agent:"analyst",label:"毎日 10:00",enabled:true,runs:38},
+    {id:"4",name:"競合モニタリング",goal:"競合他社の最新動向を調査してください",agent:"research",label:"毎週月曜 10:00",enabled:false,runs:9},
+    {id:"5",name:"週次レポート",goal:"今週の成果をまとめたエグゼクティブレポートを作成してください",agent:"analyst",label:"毎週金曜 18:00",enabled:true,runs:7},
+    {id:"6",name:"バグ自動スキャン",goal:"コードベースをQAして発見したバグをすべて修正してください",agent:"qa",label:"毎日 2:00",enabled:true,runs:21},
+  ]);
 
-  const dept = selectedDept ? depts.find(d=>d.id===selectedDept) : null;
+  const runRef=useRef<Set<string>>(new Set());
 
-  return (
+  const upd=useCallback((id:string,u:Partial<Task>)=>{
+    setTasks(prev=>prev.map(t=>t.id===id?{...t,...u}:t));
+    if((u.status==="done"||u.status==="auto_approved")&&u.xp){
+      setTotalXP(x=>x+(u.xp||0));setXpFlash(true);setTimeout(()=>setXpFlash(false),1200);
+    }
+  },[]);
+  const log=useCallback((id:string,type:string,text:string)=>{
+    setTasks(prev=>prev.map(t=>t.id===id?{...t,logs:[...t.logs,{ts:now(),type,text}]}:t));
+  },[]);
+
+  useEffect(()=>{
+    tasks.filter(t=>t.status==="pending"&&!runRef.current.has(t.id)).forEach(task=>{
+      runRef.current.add(task.id);
+      setTimeout(()=>{
+        exec(task,log,upd,(parent,agentId,title,goal,xp,tags)=>{
+          const sub:Task={id:uid(),goal,title,agent:agentId,status:"pending",priority:parent.priority,
+            output:"",parent_id:parent.id,children_ids:[],logs:[],created_at:now(),xp,
+            auto_approved:false,qa_cycles:0,qa_passed:false,tags};
+          setTasks(prev=>{const u=prev.map(t=>t.id===parent.id?{...t,children_ids:[...t.children_ids,sub.id]}:t);return[...u,sub];});
+          return sub;
+        },autoApprove).finally(()=>runRef.current.delete(task.id));
+      },task.parent_id?900:0);
+    });
+  },[tasks,log,upd,autoApprove]);
+
+  useEffect(()=>{
+    const h=()=>tasks.filter(t=>t.status==="pending").forEach(t=>{upd(t.id,{status:"auto_approved",done_at:now(),auto_approved:true,xp:t.xp});log(t.id,"auto","一括承認");});
+    document.addEventListener("approve-all",h);return()=>document.removeEventListener("approve-all",h);
+  },[tasks,upd,log]);
+
+  useEffect(()=>{
+    const h=(e:KeyboardEvent)=>{
+      if((e.metaKey||e.ctrlKey)&&e.key==="k"){e.preventDefault();setCmdOpen(p=>!p);}
+      if(e.key==="Escape")setCmdOpen(false);
+      if((e.metaKey||e.ctrlKey)&&e.key==="Enter"&&goalInput)submit(goalInput,priority);
+    };
+    window.addEventListener("keydown",h);return()=>window.removeEventListener("keydown",h);
+  },[goalInput,priority]);
+
+  const submit=useCallback((g:string,p:Priority=priority)=>{
+    if(!g.trim())return;
+    const t:Task={id:uid(),goal:g.trim(),title:g.slice(0,50),agent:"ceo",status:"pending",priority:p,
+      output:"",children_ids:[],logs:[],created_at:now(),xp:60,auto_approved:false,qa_cycles:0,qa_passed:false,tags:[]};
+    setTasks(prev=>[t,...prev]);setExpanded(prev=>new Set([...prev,t.id]));setGoalInput("");
+  },[priority]);
+
+  const top=tasks.filter(t=>!t.parent_id);
+  const running=tasks.filter(t=>["running","qa_running","qa_fixing"].includes(t.status)).length;
+  const waiting=tasks.filter(t=>t.status==="pending").length;
+
+  return(
     <>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&family=DM+Mono:wght@400;500&display=swap');
-        @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
-        @keyframes sparkle{0%{opacity:1;transform:scale(1)}100%{opacity:0;transform:scale(0) translateY(-20px)}}
+        @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&family=DM+Mono:wght@400;500&family=Outfit:wght@400;500;600;700&display=swap');
+        @keyframes blink{0%,100%{opacity:1}50%{opacity:0.3}}
+        @keyframes scanH{from{transform:translateX(-100%)}to{transform:translateX(100%)}}
+        @keyframes slideDown{from{opacity:0;transform:translateY(-8px)}to{opacity:1;transform:translateY(0)}}
         @keyframes fadeIn{from{opacity:0}to{opacity:1}}
-        @keyframes slideUp{from{transform:translateY(40px);opacity:0}to{transform:translateY(0);opacity:1}}
-        @keyframes scanline{0%{transform:translateY(-100%)}100%{transform:translateY(100vh)}}
-        @keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+        @keyframes xpPop{0%{transform:scale(1)}50%{transform:scale(1.35)}100%{transform:scale(1)}}
+        @keyframes glowPulse{0%,100%{box-shadow:0 0 12px ${C.green}55}50%{box-shadow:0 0 28px ${C.green}99}}
         *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-        body{background:#020508;}
-        ::-webkit-scrollbar{width:4px;height:4px;}
-        ::-webkit-scrollbar-track{background:#020508;}
-        ::-webkit-scrollbar-thumb{background:#1e3a5f;border-radius:2px;}
+        body{background:#020509;}
+        ::-webkit-scrollbar{width:3px;height:3px;}
+        ::-webkit-scrollbar-thumb{background:#0c1e38;border-radius:2px;}
         input,textarea,button{outline:none;}
+        ::selection{background:${C.gold}33;}
       `}</style>
 
-      <div style={{ position:"fixed",inset:0,
-        background:"repeating-linear-gradient(0deg,transparent,transparent 3px,rgba(0,0,0,0.03) 3px,rgba(0,0,0,0.03) 4px)",
-        pointerEvents:"none",zIndex:998 }}/>
+      <CmdPalette open={cmdOpen} onClose={()=>setCmdOpen(false)} onGoal={submit} onScreen={s=>setScreen(s as any)}/>
 
-      <div style={{ background:C.bg, minHeight:"100vh", color:C.text, overflow:"hidden" }}>
+      <div style={{background:C.bg,height:"100vh",display:"flex",flexDirection:"column",color:C.text,overflow:"hidden"}}>
 
-        {/* ── TOP BAR ── */}
-        <div style={{
-          height:44, background:"#030a14",
-          borderBottom:`1px solid ${C.gold}33`,
-          display:"flex", alignItems:"center", padding:"0 16px", gap:0,
-          flexShrink:0,
-        }}>
-          <div style={{ display:"flex", alignItems:"center", gap:8, marginRight:20, flexShrink:0 }}>
-            <svg width={16} height={16}>
-              {[["#22d3ee",0,0],["#ec4899",8,0],["#f59e0b",0,8],["#4ade80",8,8]].map(([c,x,y])=>(
-                <rect key={c+x} x={x} y={y} width={7} height={7} fill={c} rx={0.5}/>
-              ))}
-            </svg>
-            <span style={{ fontFamily:FONT, fontSize:6, color:C.gold, letterSpacing:"0.15em" }}>
-              COMPANY OS
-            </span>
-            <span style={{ fontFamily:FONT, fontSize:4, color:C.muted }}>RPG</span>
+        {/* TOPBAR */}
+        <div style={{height:48,background:C.surface,borderBottom:`1px solid ${C.glow}`,
+          display:"flex",alignItems:"center",padding:"0 14px",gap:0,flexShrink:0,boxShadow:"0 2px 20px rgba(0,0,0,0.6)"}}>
+          <div style={{display:"flex",alignItems:"center",gap:9,marginRight:16,flexShrink:0}}>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:1.5}}>
+              {[C.blue,C.pink,C.gold,C.green].map((c,i)=>(<div key={i} style={{width:5,height:5,background:c,boxShadow:`0 0 5px ${c}`,borderRadius:0.5}}/>))}
+            </div>
+            <div>
+              <div style={{fontFamily:FONT,fontSize:5.5,color:C.gold,letterSpacing:"0.12em"}}>COMPANY OS</div>
+              <div style={{fontFamily:MONO,fontSize:7.5,color:C.muted}}>完全自律型 v6 — 自分不要</div>
+            </div>
           </div>
 
-          {[
-            {id:"map",label:"MAP",icon:"🗺"},
-            {id:"quests",label:"QUEST",icon:"📋"},
-            {id:"achievements",label:"実績",icon:"🏆"},
-            {id:"advisor",label:"AI参謀",icon:"🔮"},
-          ].map(n=>(
-            <button key={n.id} onClick={()=>setTab(n.id)} style={{
-              background:tab===n.id?`${C.gold}15`:"transparent",
-              border:"none",
-              borderBottom:tab===n.id?`2px solid ${C.gold}`:"2px solid transparent",
-              padding:"0 14px", height:44,
-              fontFamily:FONT, fontSize:4.5,
-              color:tab===n.id?C.gold:C.muted,
-              cursor:"pointer", display:"flex", alignItems:"center", gap:5,
-            }}>
-              <span style={{fontSize:10}}>{n.icon}</span>{n.label}
+          {([{id:"tasks",l:"🤖 タスク"},{id:"sns",l:"◈ SNS"},{id:"scheduler",l:"⚙ 自動化"},{id:"agents",l:"👑 AI部隊"},{id:"health",l:"❤ ヘルス"}] as const).map(n=>(
+            <button key={n.id} onClick={()=>setScreen(n.id)} style={{
+              background:screen===n.id?`${C.gold}0d`:"transparent",border:"none",
+              borderBottom:screen===n.id?`2px solid ${C.gold}`:"2px solid transparent",
+              padding:"0 13px",height:48,fontFamily:SANS,fontSize:12.5,fontWeight:600,
+              color:screen===n.id?C.gold:C.muted,cursor:"pointer",transition:"all 0.15s"}}>
+              {n.l}
             </button>
           ))}
 
-          <div style={{ flex:1 }}/>
+          <div style={{flex:1}}/>
 
-          <div style={{ display:"flex", alignItems:"center", gap:14 }}>
-            <div style={{ display:"flex", alignItems:"center", gap:6,
-              padding:"4px 10px", border:`1px solid ${C.gold}44`,
-              background:`${C.gold}11` }}>
-              <span style={{ fontFamily:FONT, fontSize:4.5, color:C.muted }}>COMPANY</span>
-              <span style={{ fontFamily:FONT, fontSize:6, color:C.gold }}>Lv.{companyLevel}</span>
+          <button onClick={()=>setCmdOpen(true)} style={{display:"flex",alignItems:"center",gap:7,padding:"5px 12px",
+            background:C.card,border:`1px solid ${C.border}`,borderRadius:3,color:C.muted,cursor:"pointer",
+            marginRight:12,fontFamily:SANS,fontSize:12,transition:"all 0.15s"}}
+            onMouseEnter={e=>{(e.currentTarget).style.borderColor=C.gold+"55";}}
+            onMouseLeave={e=>{(e.currentTarget).style.borderColor=C.border;}}>
+            <span style={{fontFamily:FONT,fontSize:5}}>⌘</span>
+            <span>コマンド</span>
+            <span style={{fontFamily:FONT,fontSize:4,border:`1px solid ${C.border}`,padding:"1px 4px",borderRadius:1}}>K</span>
+          </button>
+
+          <div style={{marginRight:14,textAlign:"right"}}>
+            <div style={{fontFamily:FONT,fontSize:5,color:C.gold,animation:xpFlash?"xpPop 0.5s ease":"none",textShadow:xpFlash?`0 0 16px ${C.gold}`:"none"}}>⭐ {totalXP.toLocaleString()}</div>
+            <div style={{fontFamily:MONO,fontSize:8,color:C.muted}}>Company XP</div>
+          </div>
+
+          {running>0&&<div style={{display:"flex",alignItems:"center",gap:6,padding:"4px 10px",border:`1px solid ${C.gold}`,background:`${C.gold}10`,borderRadius:2,marginRight:8}}>
+            <Glow color={C.gold} size={6} pulse/><span style={{fontFamily:FONT,fontSize:4,color:C.gold}}>{running}件実行中</span>
+          </div>}
+
+          {/* 自動承認トグル — デフォルトON */}
+          <div style={{display:"flex",alignItems:"center",gap:7}}>
+            <div>
+              <div style={{fontFamily:FONT,fontSize:4,color:autoApprove?C.green:C.muted}}>{autoApprove?"⚡ 全自動モード":"手動承認"}</div>
+              <div style={{fontFamily:MONO,fontSize:7.5,color:C.muted}}>{autoApprove?"人間不要":"確認あり"}</div>
             </div>
-            <div style={{ display:"flex", alignItems:"center", gap:5 }}>
-              <span style={{ fontSize:10 }}>⭐</span>
-              <Counter target={totalXP} suffix=" XP" color={C.xp} size={9}/>
-            </div>
-            <div style={{ display:"flex", alignItems:"center", gap:5 }}>
-              <div style={{ width:5, height:5, borderRadius:"50%",
-                background:C.green, animation:"pulse 1.5s infinite" }}/>
-              <Counter target={profit} prefix="¥" color={C.green} size={9}/>
+            <div onClick={()=>setAutoApprove(p=>!p)} style={{width:46,height:24,borderRadius:12,cursor:"pointer",
+              background:autoApprove?C.green:C.dim,border:`1px solid ${autoApprove?C.green:C.border}`,
+              position:"relative",transition:"all 0.25s",
+              animation:autoApprove?"glowPulse 2s infinite":"none"}}>
+              <div style={{position:"absolute",top:4,left:autoApprove?25:4,width:14,height:14,borderRadius:"50%",background:"#fff",transition:"left 0.25s"}}/>
             </div>
           </div>
         </div>
 
-        {/* ── BODY ── */}
-        <div style={{ display:"flex", height:"calc(100vh - 44px)", overflow:"hidden" }}>
+        {/* BODY */}
+        <div style={{flex:1,display:"flex",overflow:"hidden"}}>
 
-          <div style={{ width:280, borderRight:`1px solid ${C.border}`,
-            display:"flex", flexDirection:"column", flexShrink:0, overflow:"hidden" }}>
-            <div style={{ flex:1, overflowY:"auto", padding:12 }}>
-              <TodayScore revenue={revenue} cost={cost} profit={profit} target={50000} stats={liveStats}/>
-              <div style={{ height:12 }}/>
-              <AIAdvisor advice={advice} loading={adviceLoading} onAsk={askAdvisor}/>
+          {/* LEFT */}
+          <div style={{width:288,borderRight:`1px solid ${C.border}`,display:"flex",flexDirection:"column",flexShrink:0,overflow:"hidden",background:C.surface}}>
+            <div style={{padding:13,borderBottom:`1px solid ${C.border}`,flexShrink:0}}>
+              <div style={{fontFamily:FONT,fontSize:4.5,color:C.gold,marginBottom:8}}>🎯 ゴールを投げる</div>
+              <textarea id="goal-input" value={goalInput} onChange={e=>setGoalInput(e.target.value)}
+                onKeyDown={e=>e.key==="Enter"&&e.metaKey&&submit(goalInput)}
+                placeholder="何でもいい。AIが全部やる。"
+                style={{width:"100%",height:74,background:C.card,border:`1px solid ${goalInput?C.gold+"66":C.border}`,
+                  color:C.text,fontFamily:SANS,fontSize:13,padding:"10px 12px",borderRadius:2,resize:"none",lineHeight:1.7,boxSizing:"border-box"}}/>
+              <div style={{display:"flex",gap:4,margin:"7px 0"}}>
+                {(["critical","high","normal","low"] as Priority[]).map(p=>{
+                  const col={critical:C.red,high:C.orange,normal:C.blue,low:C.muted}[p];
+                  return(<button key={p} onClick={()=>setPriority(p)} style={{flex:1,padding:"4px 0",fontFamily:FONT,fontSize:3.5,cursor:"pointer",borderRadius:1,
+                    background:priority===p?`${col}18`:"transparent",border:`1px solid ${priority===p?col:C.border}`,color:priority===p?col:C.muted}}>
+                    {p==="critical"?"🔴緊":p==="high"?"🟠高":p==="normal"?"🔵普":"⚪低"}
+                  </button>);
+                })}
+              </div>
+              <Btn onClick={()=>submit(goalInput)} disabled={!goalInput.trim()} color={C.gold} full size="lg">▶ AIに全部任せる</Btn>
+              <div style={{fontFamily:MONO,fontSize:9,color:C.muted,textAlign:"center",marginTop:5}}>⌘+Enter で即実行</div>
+            </div>
+            <div style={{flex:1,overflowY:"auto",padding:"10px 12px"}}>
+              <div style={{fontFamily:FONT,fontSize:4,color:C.muted,marginBottom:8}}>⚡ クイック</div>
+              {QUICK.map(([icon,label,goal,p])=>(
+                <div key={label} onClick={()=>submit(goal,p as Priority)}
+                  style={{padding:"8px 10px",marginBottom:5,cursor:"pointer",background:C.card,border:`1px solid ${C.border}`,
+                    borderRadius:2,display:"flex",alignItems:"center",gap:9,transition:"all 0.15s"}}
+                  onMouseEnter={e=>{(e.currentTarget as HTMLElement).style.borderColor=C.gold+"55";(e.currentTarget as HTMLElement).style.background=`${C.gold}08`;}}
+                  onMouseLeave={e=>{(e.currentTarget as HTMLElement).style.borderColor=C.border;(e.currentTarget as HTMLElement).style.background=C.card;}}>
+                  <span style={{fontSize:14,flexShrink:0}}>{icon}</span>
+                  <span style={{fontFamily:SANS,fontSize:12,color:C.text,flex:1}}>{label}</span>
+                  <span style={{fontFamily:FONT,fontSize:3.5,color:p==="critical"?C.red:p==="high"?C.orange:C.muted,border:"1px solid currentColor",padding:"1px 4px"}}>{p==="critical"?"緊急":p==="high"?"高":"普"}</span>
+                </div>
+              ))}
             </div>
           </div>
 
-          <div style={{ flex:1, overflow:"auto" }}>
+          {/* MAIN */}
+          <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
 
-            {tab==="map" && (
-              <div style={{ padding:20 }}>
-                <div style={{ fontFamily:FONT, fontSize:5.5, color:C.muted,
-                  marginBottom:16, letterSpacing:"0.15em" }}>■ OFFICE MAP — クリックで部署を選択</div>
-                <div style={{
-                  display:"grid",
-                  gridTemplateColumns:"repeat(auto-fill, minmax(260px, 1fr))",
-                  gap:14,
-                }}>
-                  {depts.map(d=>(
-                    DEPT_ROOM_CONFIGS[d.id] ? (
-                      <DeptRoom
-                        key={d.id}
-                        deptId={d.id}
-                        selected={selectedDept===d.id}
-                        onClick={()=>setSelectedDept(selectedDept===d.id?null:d.id)}
-                      />
-                    ) : (
-                      <DeptRPGCard key={d.id} dept={d} onClick={()=>setSelectedDept(selectedDept===d.id?null:d.id)}/>
-                    )
-                  ))}
-                </div>
-                {dept && (
-                  <div style={{
-                    marginTop:16, padding:16,
-                    background:C.panel, borderRadius:3,
-                    border:`1px solid ${dept.color}55`,
-                    boxShadow:`0 0 20px ${dept.color}11`,
-                    animation:"fadeIn 0.2s ease",
-                  }}>
-                    <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14 }}>
-                      <span style={{ fontSize:20 }}>{dept.icon}</span>
-                      <span style={{ fontFamily:FONT, fontSize:8, color:dept.color }}>{dept.name}</span>
-                      <div style={{ marginLeft:"auto", fontFamily:FONT, fontSize:6,
-                        color:C.gold, padding:"2px 8px",
-                        border:`1px solid ${C.gold}44` }}>Lv.{dept.level}</div>
-                    </div>
-                    <div style={{ marginBottom:14 }}>
-                      <DeptRPGCard dept={dept} onClick={()=>{}}/>
-                    </div>
-                    <div style={{ fontFamily:FONT, fontSize:5, color:C.muted,
-                      marginBottom:8, letterSpacing:"0.1em" }}>アクティブクエスト</div>
-                    {dept.quests.map(q=>(
-                      <QuestCard key={q.id} quest={q} onComplete={completeQuest}/>
-                    ))}
-                    <button
-                      onClick={()=>askAdvisor(`${dept.name}の改善方法を教えて`)}
-                      style={{
-                        width:"100%", marginTop:8, padding:"8px",
-                        background:`${dept.color}18`, border:`1px solid ${dept.color}44`,
-                        fontFamily:FONT, fontSize:4.5, color:dept.color, cursor:"pointer",
-                        borderRadius:2,
-                      }}>
-                      🔮 AI参謀に {dept.name} の戦略を聞く
-                    </button>
+            {screen==="tasks"&&(
+              <div style={{flex:1,overflow:"auto",padding:14}}>
+                <HealthPanel tasks={tasks} posts={posts} schedules={schedules}/>
+                {(running>0||waiting>0)&&(
+                  <div style={{padding:"8px 14px",marginBottom:10,background:C.card,border:`1px solid ${C.gold}44`,borderRadius:3,display:"flex",alignItems:"center",gap:12}}>
+                    <Glow color={C.gold} size={6} pulse/>
+                    <span style={{fontFamily:SANS,fontSize:12.5,color:C.gold,flex:1}}>
+                      {running>0&&`${running}件実行中`}{running>0&&waiting>0&&" · "}{waiting>0&&`${waiting}件待機`}
+                      {autoApprove&&" → 自動承認で全部処理されます"}
+                    </span>
+                    <Btn onClick={()=>tasks.filter(t=>t.status==="pending").forEach(t=>{upd(t.id,{status:"auto_approved",done_at:now(),auto_approved:true,xp:t.xp});log(t.id,"auto","一括承認");})} color={C.green} size="sm">✓ 一括承認</Btn>
+                    <Btn onClick={()=>setTasks(p=>p.filter(t=>t.status!=="done"&&t.status!=="auto_approved"&&t.status!=="failed"))} color={C.muted} size="sm">完了を消す</Btn>
+                    <Btn onClick={()=>setTasks([])} color={C.red} size="sm">🗑 全消去</Btn>
                   </div>
                 )}
-              </div>
-            )}
-
-            {tab==="quests" && (
-              <div style={{ padding:20 }}>
-                <div style={{ fontFamily:FONT, fontSize:5.5, color:C.muted,
-                  marginBottom:16, letterSpacing:"0.15em" }}>■ ACTIVE QUESTS</div>
-                <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:10, marginBottom:20 }}>
-                  {[
-                    {label:"進行中",value:depts.flatMap(d=>d.quests).filter(q=>!q.done).length,color:C.blue},
-                    {label:"完了済",value:depts.flatMap(d=>d.quests).filter(q=>q.done).length,color:C.green},
-                    {label:"獲得XP",value:totalXP,color:C.xp},
-                  ].map(s=>(
-                    <div key={s.label} style={{ padding:"12px", background:C.panel,
-                      border:`1px solid ${s.color}33`, borderRadius:2, textAlign:"center" }}>
-                      <Counter target={s.value} color={s.color} size={16}/>
-                      <div style={{ fontFamily:MONO, fontSize:10, color:C.muted, marginTop:4 }}>{s.label}</div>
+                {top.length===0&&(
+                  <div style={{textAlign:"center",paddingTop:50}}>
+                    <div style={{fontSize:56,marginBottom:14,filter:`drop-shadow(0 0 24px ${C.gold})`}}>👑</div>
+                    <div style={{fontFamily:FONT,fontSize:7,color:C.gold,marginBottom:12,letterSpacing:"0.1em"}}>READY</div>
+                    <div style={{fontFamily:SANS,fontSize:13.5,color:C.muted,lineHeight:2}}>
+                      左にゴールを入力するか ⌘K でコマンドを開いてください<br/>
+                      <br/>
+                      <span style={{fontFamily:MONO,fontSize:11,color:autoApprove?C.green:C.muted}}>
+                        {autoApprove?"⚡ 自動承認ON — 人間は不要です":"手動承認モード — ONにすると全自動"}
+                      </span>
                     </div>
-                  ))}
-                </div>
-                {depts.map(d=>(
-                  <div key={d.id} style={{ marginBottom:20 }}>
-                    <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:8 }}>
-                      <span style={{ fontSize:14 }}>{d.icon}</span>
-                      <span style={{ fontFamily:FONT, fontSize:6, color:d.color }}>{d.name}</span>
-                      <div style={{ fontFamily:FONT, fontSize:4, color:C.gold,
-                        padding:"1px 5px", border:`1px solid ${C.gold}44` }}>Lv.{d.level}</div>
-                    </div>
-                    {d.quests.map(q=>(
-                      <QuestCard key={q.id} quest={q} onComplete={completeQuest}/>
-                    ))}
                   </div>
+                )}
+                {top.map(t=>(
+                  <TaskCard key={t.id} task={t} tasks={tasks}
+                    onApprove={()=>{upd(t.id,{status:"auto_approved",done_at:now(),auto_approved:true,xp:t.xp});log(t.id,"auto","手動承認");}}
+                    onReject={()=>upd(t.id,{status:"failed",done_at:now()})}
+                    onToggle={()=>setExpanded(prev=>{const n=new Set(prev);n.has(t.id)?n.delete(t.id):n.add(t.id);return n;})}
+                    expanded={expanded.has(t.id)}/>
                 ))}
               </div>
             )}
 
-            {tab==="achievements" && (
-              <div style={{ padding:20 }}>
-                <div style={{ fontFamily:FONT, fontSize:5.5, color:C.muted,
-                  marginBottom:6, letterSpacing:"0.15em" }}>■ ACHIEVEMENTS</div>
-                <div style={{ fontFamily:MONO, fontSize:11, color:C.muted, marginBottom:16 }}>
-                  {ACHIEVEMENTS_LIST.filter(a=>a.unlocked).length} / {ACHIEVEMENTS_LIST.length} 解除済み
+            {screen==="sns"&&(
+              <div style={{flex:1,overflow:"hidden",display:"flex",flexDirection:"column"}}>
+                <div style={{padding:"10px 16px",borderBottom:`1px solid ${C.border}`,flexShrink:0,display:"flex",gap:12,alignItems:"center"}}>
+                  <div style={{fontFamily:FONT,fontSize:5.5,color:C.pink}}>◈ SNS運用コンソール</div>
+                  <div style={{flex:1}}/>
+                  <Btn onClick={()=>submit("今日のSNS投稿コンテンツを全プラットフォーム向けに生成してください","high")} color={C.pink} size="sm">✦ AIで全部生成</Btn>
                 </div>
-                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
-                  {ACHIEVEMENTS_LIST.map(a=>(
-                    <div key={a.id} style={{
-                      padding:"14px 16px", borderRadius:3,
-                      border:`1px solid ${a.unlocked?C.gold+"55":C.border}`,
-                      background:a.unlocked?`${C.gold}08`:C.panel,
-                      opacity:a.unlocked?1:0.5,
-                    }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:6 }}>
-                        <span style={{ fontSize:22,
-                          filter:a.unlocked?"none":"grayscale(1)" }}>{a.icon}</span>
-                        <div style={{ flex:1 }}>
-                          <div style={{ fontFamily:FONT, fontSize:5,
-                            color:a.unlocked?C.gold:C.muted }}>{a.name}</div>
-                          <div style={{ fontFamily:MONO, fontSize:10,
-                            color:C.muted, marginTop:3 }}>{a.desc}</div>
+                <SNSComposer onSave={p=>setPosts(prev=>[p,...prev])}/>
+                {posts.length>0&&(
+                  <div style={{borderTop:`1px solid ${C.border}`,padding:"10px 16px",maxHeight:180,overflow:"auto",flexShrink:0}}>
+                    <div style={{fontFamily:FONT,fontSize:4,color:C.muted,marginBottom:8}}>保存済み投稿</div>
+                    {posts.map(p=>{
+                      const pl=PLATFORMS.find(x=>x.id===p.platform)!;
+                      return(<div key={p.id} style={{display:"flex",alignItems:"center",gap:8,marginBottom:5,padding:"7px 12px",background:C.card,border:`1px solid ${pl.color}22`,borderRadius:2}}>
+                        <Tag color={pl.color}>{pl.icon} {pl.name}</Tag>
+                        <Tag color={p.status==="scheduled"?C.gold:p.status==="posted"?C.green:C.muted}>{p.status==="scheduled"?"予約":p.status==="posted"?"投稿済":"下書き"}</Tag>
+                        {p.ai_score>0&&<span style={{fontFamily:FONT,fontSize:5,color:p.ai_score>=80?C.green:C.gold}}>🎯{p.ai_score}</span>}
+                        <span style={{fontFamily:MONO,fontSize:10.5,color:C.muted,flex:1,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{p.content.slice(0,60)}</span>
+                        <Btn onClick={()=>navigator.clipboard.writeText(p.content)} color={C.blue} size="xs">📋</Btn>
+                        <Btn onClick={()=>setPosts(prev=>prev.filter(x=>x.id!==p.id))} color={C.red} size="xs">🗑</Btn>
+                      </div>);
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {screen==="scheduler"&&(
+              <div style={{flex:1,overflow:"auto",padding:16}}>
+                <div style={{fontFamily:FONT,fontSize:5.5,color:C.lime,marginBottom:12}}>⚙ 自動実行スケジューラ</div>
+                <div style={{fontFamily:SANS,fontSize:13,color:C.muted,marginBottom:14,lineHeight:1.7,padding:"10px 14px",background:C.card,border:`1px solid ${C.border}`,borderRadius:2}}>
+                  💡 Windowsエージェント常駐 + Vercel Cron で自動実行。スマホからON/OFFできます。
+                </div>
+                {schedules.map(s=>{
+                  const ag=AGENTS[s.agent];
+                  return(<div key={s.id} style={{marginBottom:10,padding:"13px 16px",background:C.card,borderRadius:3,
+                    border:`1px solid ${s.enabled?ag.color+"55":C.border}`,opacity:s.enabled?1:0.55,
+                    boxShadow:s.enabled?`0 0 16px ${ag.color}0d`:"none",transition:"all 0.2s"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:12}}>
+                      <Glow color={s.enabled?ag.color:C.muted} size={s.enabled?9:6} pulse={s.enabled}/>
+                      <div style={{flex:1}}>
+                        <div style={{fontFamily:SANS,fontSize:13,fontWeight:600,color:C.text,marginBottom:4}}>{s.name}</div>
+                        <div style={{display:"flex",gap:8,flexWrap:"wrap",alignItems:"center"}}>
+                          <Tag color={ag.color}>{ag.icon} {ag.name}</Tag>
+                          <span style={{fontFamily:MONO,fontSize:10,color:C.gold}}>⏰ {s.label}</span>
+                          <span style={{fontFamily:MONO,fontSize:10,color:C.muted}}>実行{s.runs}回</span>
+                          {s.next&&<span style={{fontFamily:MONO,fontSize:10,color:C.muted}}>次:{new Date(s.next).toLocaleString("ja-JP",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"})}</span>}
                         </div>
-                        {a.unlocked && (
-                          <div style={{ fontFamily:FONT, fontSize:5, color:C.gold }}>✓</div>
-                        )}
                       </div>
-                      {!a.unlocked && (
-                        <div style={{ fontFamily:FONT, fontSize:4.5,
-                          color:C.muted, letterSpacing:"0.1em" }}>???</div>
-                      )}
+                      <div onClick={()=>setSchedules(prev=>prev.map(x=>x.id===s.id?{...x,enabled:!x.enabled}:x))}
+                        style={{width:46,height:24,borderRadius:12,cursor:"pointer",flexShrink:0,
+                          background:s.enabled?C.green:C.dim,border:`1px solid ${s.enabled?C.green:C.border}`,
+                          position:"relative",transition:"all 0.25s",boxShadow:s.enabled?`0 0 12px ${C.green}55`:"none"}}>
+                        <div style={{position:"absolute",top:4,left:s.enabled?25:4,width:14,height:14,borderRadius:"50%",background:"#fff",transition:"left 0.25s"}}/>
+                      </div>
+                      <Btn onClick={()=>submit(s.goal,s.agent==="ceo"?"high":"normal")} color={ag.color} size="xs">今すぐ</Btn>
                     </div>
-                  ))}
+                  </div>);
+                })}
+                <Btn onClick={()=>{const name=prompt("スケジュール名");const goal=prompt("ゴール");if(name&&goal)setSchedules(p=>[...p,{id:uid(),name,goal,agent:"ceo",label:"手動",enabled:true,runs:0}]);}} color={C.lime} size="md">+ 追加</Btn>
+              </div>
+            )}
+
+            {screen==="agents"&&(
+              <div style={{flex:1,overflow:"auto",padding:16}}>
+                <div style={{fontFamily:FONT,fontSize:5.5,color:C.gold,marginBottom:14}}>👑 AI部隊ステータス</div>
+                <div style={{display:"grid",gridTemplateColumns:"repeat(2,1fr)",gap:12}}>
+                  {(Object.entries(AGENTS) as [AgentId,typeof AGENTS[AgentId]][]).map(([id,ag])=>{
+                    const at=tasks.filter(t=>t.agent===id);
+                    const live=at.some(t=>["running","qa_running","qa_fixing"].includes(t.status));
+                    const done=at.filter(t=>t.status==="done"||t.status==="auto_approved").length;
+                    const xpG=at.reduce((s,t)=>s+(t.xp||0),0);
+                    const autoA=at.filter(t=>t.auto_approved).length;
+                    return(<div key={id} style={{padding:15,background:C.card,borderRadius:3,
+                      border:`1px solid ${live?ag.color+"88":ag.color+"22"}`,boxShadow:live?`0 0 22px ${ag.color}18`:"none",transition:"all 0.3s"}}>
+                      <div style={{display:"flex",gap:10,marginBottom:10,alignItems:"flex-start"}}>
+                        <span style={{fontSize:20}}>{ag.icon}</span>
+                        <div style={{flex:1}}>
+                          <div style={{fontFamily:FONT,fontSize:5.5,color:ag.color,marginBottom:2}}>{ag.name}</div>
+                          <div style={{fontFamily:MONO,fontSize:9,color:C.muted}}>{ag.role}</div>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          <div style={{fontFamily:FONT,fontSize:5,color:C.gold}}>Lv.{ag.level}</div>
+                          {live&&<div style={{fontFamily:FONT,fontSize:4,color:ag.color,animation:"blink 1.5s infinite"}}>稼働中</div>}
+                        </div>
+                      </div>
+                      <div style={{height:3,background:C.dim,borderRadius:2,marginBottom:8}}>
+                        <div style={{height:"100%",width:`${(ag.level%10)*10}%`,background:ag.color,boxShadow:`0 0 5px ${ag.color}`,borderRadius:2}}/>
+                      </div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:5,marginBottom:10}}>
+                        {[{l:"完了",v:done,c:C.green},{l:"自動",v:autoA,c:C.teal},{l:"XP",v:xpG,c:C.gold},{l:"全",v:at.length,c:C.muted}].map(m=>(
+                          <div key={m.l} style={{textAlign:"center",padding:"5px 4px",background:C.surface,borderRadius:1}}>
+                            <div style={{fontFamily:FONT,fontSize:7,color:m.c}}>{m.v}</div>
+                            <div style={{fontFamily:MONO,fontSize:8,color:C.muted}}>{m.l}</div>
+                          </div>
+                        ))}
+                      </div>
+                      <Btn onClick={()=>{const g=prompt(`${ag.name}に直接指示`);if(g){const t:Task={id:uid(),goal:g,title:g.slice(0,45),agent:id,status:"pending",priority:"high",output:"",children_ids:[],logs:[],created_at:now(),xp:120,auto_approved:false,qa_cycles:0,qa_passed:false,tags:["direct"]};setTasks(prev=>[t,...prev]);setScreen("tasks");}}} color={ag.color} size="xs" full>直接指示を出す</Btn>
+                    </div>);
+                  })}
                 </div>
               </div>
             )}
 
-            {tab==="advisor" && (
-              <div style={{ padding:20 }}>
-                <div style={{ fontFamily:FONT, fontSize:5.5, color:C.muted,
-                  marginBottom:16, letterSpacing:"0.15em" }}>■ AI参謀 — 戦略ブリーフィング</div>
-                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10, marginBottom:20 }}>
+            {screen==="health"&&(
+              <div style={{flex:1,overflow:"auto",padding:16}}>
+                <div style={{fontFamily:FONT,fontSize:5.5,color:C.red,marginBottom:14}}>❤ システムヘルス</div>
+                <HealthPanel tasks={tasks} posts={posts} schedules={schedules}/>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:16}}>
                   {[
-                    {title:"売上 改善余地", value:"+¥12万/月", detail:"広報部の投稿頻度を2倍にすると推定", color:C.green, icon:"📈"},
-                    {title:"コスト 削減余地", value:"-¥3.2万/月", detail:"Runway APIをバッチ処理に変えると削減可能", color:C.blue, icon:"💡"},
-                    {title:"リスク警告", value:"営業部HP低下", detail:"商談数が減少傾向。フォローアップを強化", color:C.red, icon:"⚠"},
-                    {title:"今週のチャンス", value:"note流入↑", detail:"SEO記事のCV率が最高水準。投稿強化タイミング", color:C.gold, icon:"✦"},
-                  ].map(c=>(
-                    <div key={c.title} style={{
-                      padding:"12px 14px", background:C.panel, borderRadius:2,
-                      border:`1px solid ${c.color}44`,
-                      boxShadow:`0 0 12px ${c.color}11`,
-                    }}>
-                      <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:6 }}>
-                        <span style={{ fontSize:16 }}>{c.icon}</span>
-                        <span style={{ fontFamily:FONT, fontSize:4.5, color:c.color }}>{c.title}</span>
-                      </div>
-                      <div style={{ fontFamily:FONT, fontSize:10, color:c.color, marginBottom:5 }}>{c.value}</div>
-                      <div style={{ fontFamily:MONO, fontSize:10, color:C.muted, lineHeight:1.7 }}>{c.detail}</div>
-                      <button
-                        onClick={()=>askAdvisor(c.title+"の詳細な改善策を教えて")}
-                        style={{ marginTop:8, padding:"4px 10px",
-                          fontFamily:FONT, fontSize:4, background:`${c.color}18`,
-                          border:`1px solid ${c.color}44`, color:c.color,
-                          cursor:"pointer", borderRadius:1 }}>
-                        詳しく聞く
-                      </button>
+                    {label:"自動承認 (デフォルトON)",value:autoApprove?"🟢 有効":"🔴 無効",color:autoApprove?C.green:C.red,desc:"タスク完了時に人間の承認不要"},
+                    {label:"QA自動修正ループ",value:"🟢 有効",color:C.purple,desc:"バグ発見 → 自動修正 → 再検証（最大3サイクル）"},
+                    {label:"git自動コミット",value:"🟡 エージェント要",color:C.gold,desc:"Windowsエージェントが担当"},
+                    {label:"SNS自動投稿",value:"🟡 エージェント要",color:C.gold,desc:"Windowsエージェントが担当"},
+                    {label:"Vercel Cron",value:"🟢 設定済",color:C.green,desc:"10分ごとにスケジューラを実行"},
+                    {label:"Supabase Realtime",value:"🟢 接続中",color:C.green,desc:"全デバイスにリアルタイム同期"},
+                  ].map(item=>(
+                    <div key={item.label} style={{padding:"14px 16px",background:C.card,border:`1px solid ${item.color}33`,borderRadius:3}}>
+                      <div style={{fontFamily:FONT,fontSize:5,color:item.color,marginBottom:6}}>{item.value}</div>
+                      <div style={{fontFamily:SANS,fontSize:12.5,fontWeight:600,color:C.text,marginBottom:4}}>{item.label}</div>
+                      <div style={{fontFamily:MONO,fontSize:10,color:C.muted}}>{item.desc}</div>
                     </div>
                   ))}
                 </div>
-                {(advice || adviceLoading) && (
-                  <div style={{ padding:16, background:`${C.purple}08`,
-                    border:`1px solid ${C.purple}44`, borderRadius:2, marginBottom:16 }}>
-                    <div style={{ fontFamily:FONT, fontSize:5, color:C.purple, marginBottom:8 }}>
-                      🔮 AI参謀からの回答
-                    </div>
-                    {adviceLoading && !advice ? (
-                      <div style={{ display:"flex", gap:6 }}>
-                        {[0,1,2].map(i=>(
-                          <div key={i} style={{ width:6, height:6, borderRadius:"50%",
-                            background:C.purple, animation:"pulse 1s infinite",
-                            animationDelay:`${i*0.2}s` }}/>
-                        ))}
+                {tasks.filter(t=>t.qa_cycles>0).length>0&&(
+                  <div>
+                    <div style={{fontFamily:FONT,fontSize:4.5,color:C.purple,marginBottom:8}}>🔬 QA自動修正履歴</div>
+                    {tasks.filter(t=>t.qa_cycles>0).map(t=>(
+                      <div key={t.id} style={{marginBottom:6,padding:"10px 14px",background:C.card,border:`1px solid ${C.purple}33`,borderRadius:2,display:"flex",gap:10,alignItems:"center"}}>
+                        <Tag color={t.qa_passed?C.green:C.orange}>{t.qa_passed?"QA合格":"修正済"}</Tag>
+                        <span style={{fontFamily:SANS,fontSize:12,color:C.text,flex:1}}>{t.title}</span>
+                        <span style={{fontFamily:FONT,fontSize:5,color:C.purple}}>修正{t.qa_cycles}回</span>
                       </div>
-                    ) : (
-                      <div style={{ fontFamily:MONO, fontSize:12, color:C.text,
-                        lineHeight:1.9, whiteSpace:"pre-wrap" }}>
-                        {advice}
-                        {adviceLoading && (
-                          <span style={{ display:"inline-block", width:7, height:13,
-                            background:C.purple, marginLeft:2,
-                            animation:"pulse 0.8s infinite", verticalAlign:"text-bottom" }}/>
-                        )}
-                      </div>
-                    )}
+                    ))}
                   </div>
                 )}
-                <div style={{ fontFamily:FONT, fontSize:5, color:C.muted, marginBottom:10 }}>
-                  クイック相談
-                </div>
-                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:8 }}>
-                  {[
-                    "今日の収支を改善するには？",
-                    "どの部署を強化すべき？",
-                    "今週中にできる施策は？",
-                    "APIコストを下げるには？",
-                    "売上を今月20%上げるには？",
-                    "一番緊急度の高い課題は？",
-                  ].map(q=>(
-                    <button key={q} onClick={()=>askAdvisor(q)} disabled={adviceLoading}
-                      style={{
-                        padding:"10px 12px", textAlign:"left",
-                        fontFamily:MONO, fontSize:11,
-                        background:adviceLoading?C.bg:`${C.purple}11`,
-                        border:`1px solid ${adviceLoading?C.border:C.purple+"44"}`,
-                        color:adviceLoading?C.muted:C.text, cursor:adviceLoading?"not-allowed":"pointer",
-                        borderRadius:2, lineHeight:1.6, transition:"all 0.2s",
-                      }}>
-                      🔮 {q}
-                    </button>
-                  ))}
-                </div>
               </div>
             )}
           </div>
         </div>
       </div>
-
-      {levelUp && (
-        <LevelUpOverlay dept={levelUp.dept} level={levelUp.level} onClose={()=>setLevelUp(null)}/>
-      )}
-      {achievement && (
-        <AchievementToast achievement={achievement} onClose={()=>setAchievement(null)}/>
-      )}
     </>
   );
 }
