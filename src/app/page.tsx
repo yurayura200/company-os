@@ -72,7 +72,13 @@ const AGENTS:Record<AgentId,{name:string;icon:string;color:string;role:string;le
     sys:`あなたはスタートアップCEO AIです。目標を分析し最適なタスクに分解して各部署に割り振ります。
 部署: dev(実装), qa(テスト・修正), pr(SNS), sales(営業), research(調査), automation(自動化), analyst(分析)
 JSON配列で返してください: [{"agent":"agentId","title":"タスク名","description":"詳細","priority":"high","xp":150,"tags":["tag"]}]
-devタスクには必ず後続のqaタスクも追加してください。`},
+devタスクには必ず後続のqaタスクも追加してください。
+
+【実行可能アクション】タスク内で即座に実行したい場合は [EXEC:action:{"key":"value"}] タグを使ってください:
+- [EXEC:slack.send:{"text":"メッセージ"}] → Slack通知
+- [EXEC:discord.send:{"text":"メッセージ"}] → Discord通知
+- [EXEC:github.create_issue:{"title":"タイトル","body":"内容","repo":"yurayura200/company-os"}] → Issue作成
+- [EXEC:supabase.select:{"table":"テーブル名"}] → DB読取`},
   dev:{name:"Dev AI",icon:"⌨",color:C.blue,role:"フルスタック実装",level:38,
     sys:`あなたはシニアエンジニアAIです。Next.js 14+TypeScript+Supabase+Vercelで実装します。
 必ず: ①完全な型定義 ②エラーハンドリング ③パフォーマンス最適化 ④セキュリティ考慮
@@ -81,9 +87,12 @@ devタスクには必ず後続のqaタスクも追加してください。`},
     sys:`あなたは自動QAエンジニアAIです。コードを徹底レビューしてバグを発見・修正します。
 JSONで返してください: {"bugs":[{"severity":"critical/high/medium","desc":"説明","fix":"修正内容"}],"test_code":"テストコード","deploy_ok":true,"fixed_code":"修正済みコード全体"}`},
   pr:{name:"PR AI",icon:"◈",color:C.pink,role:"SNS・バイラル戦略",level:33,
-    sys:`あなたは日本トップSNSマーケターAIです。TikTok・Threads・X・note・Instagram・YouTube向けのバズるコンテンツを作ります。各投稿にAIバズ予測スコア(0-100)を付けてください。`},
+    sys:`あなたは日本トップSNSマーケターAIです。TikTok・Threads・X・note・Instagram・YouTube向けのバズるコンテンツを作ります。各投稿にAIバズ予測スコア(0-100)を付けてください。
+投稿完成後、Slackに通知する場合は末尾に [EXEC:slack.send:{"text":"📱 SNS投稿完成: (タイトル)"}] を追加。`},
   sales:{name:"Sales AI",icon:"◆",color:C.orange,role:"BtoB営業・商談",level:28,
-    sys:`あなたは日本BtoB営業専門AIです。件名・本文・PS・フォローアップ3回分を一式提供します。返信率最大化の内容にしてください。`},
+    sys:`あなたは日本BtoB営業専門AIです。件名・本文・PS・フォローアップ3回分を一式提供します。返信率最大化の内容にしてください。
+営業メール完成後、Slackに通知: [EXEC:slack.send:{"text":"✉️ 営業メール作成完了: (件名)"}]
+重要案件はGitHub Issue作成: [EXEC:github.create_issue:{"title":"営業: (企業名)","body":"(概要)","repo":"yurayura200/company-os"}]`},
   research:{name:"Research AI",icon:"🔭",color:"#22d3ee",role:"市場調査・競合分析",level:30,
     sys:`あなたは市場調査専門AIです。具体的なデータ・数値・事例・アクション提言付きで調査結果をまとめてください。`},
   automation:{name:"Auto AI",icon:"⚙",color:C.lime,role:"完全自動化・Bot",level:26,
@@ -405,6 +414,14 @@ function SNSComposer({onSave}:{onSave:(p:SNSPost)=>void}){
   );
 }
 
+/* ─── REAL ACTION EXECUTOR ─── */
+async function execAction(action:string,params:any):Promise<{ok:boolean;data?:any;error?:string}>{
+  try{
+    const res=await fetch("/api/exec",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({action,params})});
+    return await res.json();
+  }catch(e:any){return{ok:false,error:e.message};}
+}
+
 /* ─── EXECUTION ENGINE ─── */
 async function exec(
   task:Task,
@@ -415,9 +432,27 @@ async function exec(
 ){
   const log=(t:string,m:string)=>addLog(task.id,t,m);
   upd(task.id,{status:"running",started_at:now()});
-  const finish=(output:string,xp=task.xp)=>{
+  const finish=async(output:string,xp=task.xp)=>{
     upd(task.id,{status:"auto_approved",done_at:now(),output,auto_approved:true,xp});
     log("auto",autoApprove?"⚡ 自動承認 → 完了":"✓ 完了");
+    // Scan output for [EXEC:...] tags and execute them
+    await runExecTags(output);
+  };
+
+  // Helper: detect and execute [EXEC:action:json] tags in AI output
+  const runExecTags=async(output:string)=>{
+    const regex=/\[EXEC:([a-z_.]+):(\{[^}]+\})\]/g;
+    let match;
+    while((match=regex.exec(output))!==null){
+      const[,action,jsonStr]=match;
+      try{
+        const params=JSON.parse(jsonStr);
+        log("exec",`🔧 実行: ${action}`);
+        const result=await execAction(action,params);
+        if(result.ok)log("exec",`✅ ${action} 成功: ${JSON.stringify(result.data).slice(0,100)}`);
+        else log("error",`❌ ${action} 失敗: ${result.error}`);
+      }catch(e:any){log("error",`実行エラー: ${e.message}`);}
+    }
   };
   try{
     if(task.agent==="ceo"){
@@ -436,7 +471,7 @@ async function exec(
       let out="";
       await stream(AGENTS.dev.sys,[{role:"user",content:`実装:\n${task.goal}\n\nNext.js 14+TypeScript+Supabaseで完全コードをファイルパス付きで提供してください。型定義・エラーハンドリング含む。`}],c=>{out+=c;upd(task.id,{output:out});},1500);
       log("result","実装完了 → QAに送信");
-      finish(out,200);
+      await finish(out,200);
       if(out.length>100)spawn(task,"qa",`QA: ${task.title}`,"以下のコードをQAして自動修正してください:\n\n"+out.slice(0,2500),150,["auto-qa"]);
       return;
     }
@@ -473,25 +508,25 @@ async function exec(
       log("think","バズ戦略策定中...");await wait(400);log("action","コンテンツ生成中...");
       let out="";
       await stream(AGENTS.pr.sys,[{role:"user",content:`SNSコンテンツ作成:\n${task.goal}\n\nTikTok・Threads・X・note・Instagram・YouTube向けの完成形投稿文を、ハッシュタグ・バズ予測スコア(0-100)込みで提供してください。`}],c=>{out+=c;upd(task.id,{output:out});},1000);
-      log("post","✦ 全プラットフォーム生成完了");finish(out,130);return;
+      log("post","✦ 全プラットフォーム生成完了");await finish(out,130);return;
     }
     if(task.agent==="sales"){
       log("think","ターゲット分析中...");await wait(400);log("search","企業リサーチ中...");await wait(600);log("email","メール生成中...");
       let out="";
       await stream(AGENTS.sales.sys,[{role:"user",content:`営業:\n${task.goal}\n\n件名・本文・PS・フォローアップ3回分を一式で。`}],c=>{out+=c;upd(task.id,{output:out});},900);
-      log("result","✦ 営業メール完成");finish(out,140);return;
+      log("result","✦ 営業メール完成");await finish(out,140);return;
     }
     if(task.agent==="research"){
       log("think","調査計画中...");await wait(400);log("search","データ収集中...");await wait(700);log("action","分析中...");
       let out="";
       await stream(AGENTS.research.sys,[{role:"user",content:`調査:\n${task.goal}\n\nデータ・数値・事例・アクション提言付きで。`}],c=>{out+=c;upd(task.id,{output:out});},900);
-      log("result","✦ 調査完了");finish(out,160);return;
+      log("result","✦ 調査完了");await finish(out,160);return;
     }
     if(task.agent==="automation"){
       log("think","自動化設計中...");await wait(500);
       let out="";
       await stream(AGENTS.automation.sys,[{role:"user",content:`自動化:\n${task.goal}\n\nPython・GitHub Actions・Supabase Edge Functionで動作するコードとセットアップ手順を。`}],c=>{out+=c;upd(task.id,{output:out});},1200);
-      log("deploy","✦ 自動化設計完了");finish(out,190);
+      log("deploy","✦ 自動化設計完了");await finish(out,190);
       if(out.length>100)spawn(task,"qa",`QA: ${task.title}`,"以下の自動化コードをQAして:\n\n"+out.slice(0,2500),120,["auto-qa"]);
       return;
     }
@@ -499,7 +534,7 @@ async function exec(
       log("action","データ分析中...");await wait(500);
       let out="";
       await stream(AGENTS.analyst.sys,[{role:"user",content:`分析:\n${task.goal}\n\nKPI・トレンド・改善提言込みのレポートを。`}],c=>{out+=c;upd(task.id,{output:out});},900);
-      log("result","✦ 分析レポート完成");finish(out,110);return;
+      log("result","✦ 分析レポート完成");await finish(out,110);return;
     }
   }catch(e:any){log("error",`エラー: ${e.message}`);upd(task.id,{status:"failed",done_at:now()});}
 }
