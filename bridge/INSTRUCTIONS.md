@@ -49,6 +49,6 @@ Mac 側の worker が未処理の指示を上から順に実行する。
 
 ## 指示 2026-09-24-004
 - 日時: 2026-09-24 08:35
-- 状態: 未処理
+- 状態: 実行中
 - 対象: company-os
 - 内容: `/Users/yura/scripts/asc` の既存ツール（読み取りのみ）を使い、アカウント内の全アプリについて「アプリ名 / App ID / 最新バージョン / 審査状態（appStoreVersions の state）」を取得し、`bridge/ASC_STATUS.md` に Markdown 表として書いてコミットする。REJECTED や METADATA_REJECTED 等の却下系状態のアプリが分かるように状態列は生の値をそのまま書く。書き込み系の操作（状態変更・提出・スクショ差し替え等）は一切しない。取得に失敗した場合は実際のエラーを ASC_STATUS.md に書く。
