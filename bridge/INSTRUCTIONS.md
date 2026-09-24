@@ -52,3 +52,9 @@ Mac 側の worker が未処理の指示を上から順に実行する。
 - 状態: 完了
 - 対象: company-os
 - 内容: `/Users/yura/scripts/asc` の既存ツール（読み取りのみ）を使い、アカウント内の全アプリについて「アプリ名 / App ID / 最新バージョン / 審査状態（appStoreVersions の state）」を取得し、`bridge/ASC_STATUS.md` に Markdown 表として書いてコミットする。REJECTED や METADATA_REJECTED 等の却下系状態のアプリが分かるように状態列は生の値をそのまま書く。書き込み系の操作（状態変更・提出・スクショ差し替え等）は一切しない。取得に失敗した場合は実際のエラーを ASC_STATUS.md に書く。
+
+## 指示 2026-09-25-001
+- 日時: 2026-09-25 07:30
+- 状態: 未処理
+- 対象: company-os
+- 内容: bridge/ASC_STATUS.md の REJECTED 14 件それぞれについて、App Review からの却下メッセージ（ガイドライン番号と指摘本文の要点）を App Store Connect の読み取り専用 API で取得し、`bridge/ASC_REJECTIONS.md` に「アプリ名 / App ID / ガイドライン番号 / 指摘の要約（3行以内）/ 指摘日」の表で書いてコミットする。既存の `~/scripts/asc` を優先し、足りない機能は GET のみの追加スクリプトを `~/scripts/asc` に作ってよい。書き込み系の操作（提出・状態変更・メタデータ変更等）は一切しない。同一テンプレ由来とみられる 6813xxx 帯 12 件について、指摘内容が共通かどうかの所見も最後に 5 行以内で書く。取得できないアプリは実際のエラーをそのまま書く。
